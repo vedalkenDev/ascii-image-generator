@@ -2,13 +2,16 @@ mod ascii;
 mod io;
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
+use std::thread;
 
 use ascii::{Cell, Charset, Mode, Settings};
 use eframe::egui::{
     self, Color32, ColorImage, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame,
-    Margin, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
+    Galley, Margin, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
 };
-use eframe::emath::{self, Align, TSTransform};
+use eframe::emath::{self, Align};
 use image::RgbaImage;
 
 const GROUND: Color32 = Color32::from_rgb(0x05, 0x05, 0x08);
@@ -18,12 +21,22 @@ const SAGE: Color32 = Color32::from_rgb(0x93, 0x9e, 0x7a);
 const TEAL: Color32 = Color32::from_rgb(0x3f, 0xb6, 0xaf);
 const BLUE: Color32 = Color32::from_rgb(0x42, 0x77, 0xa2);
 const CORAL: Color32 = Color32::from_rgb(0xd9, 0x63, 0x50);
-const HIT: f32 = 44.0;
+const HIT: f32 = 40.0;
+const OPEN_FILTERS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg",
+];
+
+enum Job {
+    Loaded { name: String, img: RgbaImage },
+    Failed(String),
+    Idle,
+    Saved,
+}
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 760.0])
+            .with_inner_size([1100.0, 680.0])
             .with_min_inner_size([720.0, 480.0])
             .with_title("Cosmic Archive — ASCII"),
         ..Default::default()
@@ -46,14 +59,19 @@ struct App {
     rows: u32,
     dirty: bool,
     error: Option<String>,
-    born: f64,
     reduced_motion: bool,
+    jobs_tx: Sender<Job>,
+    jobs_rx: Receiver<Job>,
+    busy: Option<&'static str>,
+    grid_gen: u64,
+    preview: Option<(u64, Vec2, Vec<Arc<Galley>>)>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_fonts(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx);
+        let (jobs_tx, jobs_rx) = mpsc::channel();
         let mut app = Self {
             settings: Settings::default(),
             mode: Mode::Ascii,
@@ -65,35 +83,18 @@ impl App {
             rows: 0,
             dirty: false,
             error: None,
-            born: cc.egui_ctx.input(|i| i.time),
             reduced_motion: reduced_motion(),
+            jobs_tx,
+            jobs_rx,
+            busy: None,
+            grid_gen: 0,
+            preview: None,
         };
         if let Some(path) = std::env::args().nth(1) {
-            app.load_path(Path::new(&path), &cc.egui_ctx);
+            app.busy = Some("Decoding…");
+            spawn_load_path(app.jobs_tx.clone(), PathBuf::from(path));
         }
         app
-    }
-
-    fn appear(&self, ctx: &egui::Context) -> f32 {
-        if self.reduced_motion {
-            return 1.0;
-        }
-        let t = ((ctx.input(|i| i.time) - self.born) / 0.22).clamp(0.0, 1.0) as f32;
-        emath::easing::cubic_out(t)
-    }
-
-    fn load_path(&mut self, path: &Path, ctx: &egui::Context) {
-        match io::load_path(path) {
-            Ok(img) => self.set_source(img, file_stem(path), ctx),
-            Err(e) => self.error = Some(e),
-        }
-    }
-
-    fn load_bytes(&mut self, name: &str, bytes: &[u8], ctx: &egui::Context) {
-        match io::load_bytes(bytes) {
-            Ok(img) => self.set_source(img, name.to_string(), ctx),
-            Err(e) => self.error = Some(e),
-        }
     }
 
     fn set_source(&mut self, img: RgbaImage, name: String, ctx: &egui::Context) {
@@ -112,11 +113,37 @@ impl App {
             self.cols = cols;
             self.rows = rows;
             self.grid = grid;
+            self.grid_gen = self.grid_gen.wrapping_add(1);
+            self.preview = None;
         }
         self.dirty = false;
     }
 
+    fn poll_jobs(&mut self, ctx: &egui::Context) {
+        while let Ok(job) = self.jobs_rx.try_recv() {
+            match job {
+                Job::Loaded { name, img } => {
+                    self.set_source(img, name, ctx);
+                    self.busy = None;
+                }
+                Job::Failed(e) => {
+                    self.error = Some(e);
+                    self.busy = None;
+                }
+                Job::Idle | Job::Saved => {
+                    self.busy = None;
+                }
+            }
+        }
+        if self.busy.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
     fn poll_drops(&mut self, ctx: &egui::Context) {
+        if self.busy.is_some() {
+            return;
+        }
         let mut path: Option<PathBuf> = None;
         let mut bytes: Option<(String, Vec<u8>)> = None;
         ctx.input(|i| {
@@ -137,70 +164,65 @@ impl App {
             }
         });
         if let Some(p) = path {
-            self.load_path(&p, ctx);
+            self.busy = Some("Decoding…");
+            spawn_load_path(self.jobs_tx.clone(), p);
         } else if let Some((name, b)) = bytes {
-            self.load_bytes(&name, &b, ctx);
+            self.busy = Some("Decoding…");
+            spawn_load_bytes(self.jobs_tx.clone(), name, b);
         }
     }
 
-    fn open_dialog(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter(
-                "Image",
-                &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg"],
-            )
-            .pick_file()
-        {
-            self.load_path(&path, ctx);
+    fn open_dialog(&mut self) {
+        if self.busy.is_some() {
+            return;
         }
+        self.busy = Some("Opening…");
+        self.error = None;
+        spawn_pick(self.jobs_tx.clone());
     }
 
     fn save_export(&mut self, kind: io::ExportKind) {
+        if self.busy.is_some() {
+            return;
+        }
         if self.grid.is_empty() {
             self.error = Some("Load a still first.".into());
             return;
         }
+        self.busy = Some("Exporting…");
         let stem = Path::new(&self.source_name)
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("ascii");
-        let name = format!("{stem}.{}", kind.ext());
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter(kind.label(), &[kind.ext()])
-            .set_file_name(&name)
-            .save_file()
-        {
-            match io::encode(kind, self.cols, self.rows, &self.grid) {
-                Ok(bytes) => {
-                    if let Err(e) = std::fs::write(&path, bytes) {
-                        self.error = Some(format!("Could not write file: {e}"));
-                    }
-                }
-                Err(e) => self.error = Some(e),
-            }
-        }
+            .unwrap_or("ascii")
+            .to_string();
+        spawn_save(
+            self.jobs_tx.clone(),
+            kind,
+            stem,
+            self.cols,
+            self.rows,
+            self.grid.clone(),
+        );
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        apply_theme(ctx);
+        self.poll_jobs(ctx);
         self.poll_drops(ctx);
         if self.dirty {
             self.rebuild();
         }
-        let appear = self.appear(ctx);
-        if appear < 1.0 {
-            ctx.request_repaint();
-        }
+        let reduced = self.reduced_motion;
+        let busy = self.busy;
 
         egui::SidePanel::right("controls")
             .resizable(false)
-            .exact_width(300.0)
+            .exact_width(280.0)
             .frame(
                 Frame::new()
                     .fill(CHARCOAL)
-                    .inner_margin(Margin::same(20))
+                    .inner_margin(Margin::same(16))
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
@@ -213,139 +235,100 @@ impl eframe::App for App {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 10.0);
-                {
-                    let (rect, _) =
-                        ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
-                    let font = FontId::monospace(11.0);
-                    let job = |color: Color32| {
-                        let mut job = egui::text::LayoutJob::default();
-                        job.append(
-                            "COSMIC ARCHIVE",
-                            0.0,
-                            egui::TextFormat {
-                                font_id: font.clone(),
-                                color,
-                                extra_letter_spacing: 2.2,
-                                ..Default::default()
-                            },
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 8.0);
+                        brand(ui, reduced);
+                        ui.label(
+                            RichText::new("ASCII stills")
+                                .family(FontFamily::Monospace)
+                                .size(18.0)
+                                .color(CREAM)
+                                .extra_letter_spacing(0.6),
                         );
-                        job
-                    };
-                    let painter = ui.painter();
-                    let pos = Pos2::new(rect.left(), rect.top());
-                    if !self.reduced_motion {
-                        painter.galley(
-                            pos + Vec2::new(1.0, 0.0),
-                            painter.layout_job(job(CORAL.gamma_multiply(0.75))),
-                            CORAL,
-                        );
-                        painter.galley(
-                            pos + Vec2::new(-1.0, 0.0),
-                            painter.layout_job(job(TEAL.gamma_multiply(0.75))),
-                            TEAL,
-                        );
-                    }
-                    painter.galley(pos, painter.layout_job(job(CREAM)), CREAM);
-                }
-                ui.label(
-                    RichText::new("ASCII stills")
-                        .family(FontFamily::Monospace)
-                        .size(20.0)
-                        .color(CREAM)
-                        .extra_letter_spacing(0.6),
-                );
-                if !self.source_name.is_empty() {
-                    ui.label(RichText::new(&self.source_name).size(13.0).color(SAGE));
-                }
-                ui.add_space(4.0);
-                if press_button(ui, "Open image", self.reduced_motion).clicked() {
-                    self.open_dialog(ctx);
-                }
-                if let Some(err) = &self.error {
-                    ui.label(RichText::new(err).color(CORAL).size(13.0));
-                }
-
-                section(ui, "Export");
-                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                let kinds = [
-                    io::ExportKind::Txt,
-                    io::ExportKind::Png,
-                    io::ExportKind::Svg,
-                    io::ExportKind::Html,
-                    io::ExportKind::Ansi,
-                ];
-                let cell_w = (ui.available_width() - 12.0) / 3.0;
-                ui.horizontal_wrapped(|ui| {
-                    for kind in kinds {
-                        if chip(ui, cell_w, kind.label(), self.reduced_motion).clicked()
-                        {
-                            self.save_export(kind);
+                        if !self.source_name.is_empty() {
+                            ui.label(RichText::new(&self.source_name).size(12.0).color(SAGE));
                         }
-                    }
-                });
-                ui.spacing_mut().item_spacing = Vec2::new(8.0, 10.0);
+                        let open_label = busy.unwrap_or("Open still");
+                        if press_button(ui, open_label, reduced).clicked() {
+                            self.open_dialog();
+                        }
+                        if let Some(err) = &self.error {
+                            ui.label(RichText::new(err).color(CORAL).size(12.0));
+                        }
 
-                section(ui, "Mode");
-                ui.horizontal(|ui| {
-                    let w = (ui.available_width() - 8.0) / 2.0;
-                    if segment(ui, w, "Overlay", self.mode == Mode::Overlay, self.reduced_motion)
-                        .clicked()
-                    {
-                        self.mode = Mode::Overlay;
-                    }
-                    if segment(ui, w, "ASCII", self.mode == Mode::Ascii, self.reduced_motion)
-                        .clicked()
-                    {
-                        self.mode = Mode::Ascii;
-                    }
-                });
+                        section(ui, "Dials");
+                        if dial_u32(ui, "Columns", &mut self.settings.cols, 20..=240) {
+                            self.dirty = true;
+                        }
+                        if dial_f32(ui, "Contrast", &mut self.settings.contrast, 0.4..=2.4) {
+                            self.dirty = true;
+                        }
+                        if dial_f32(ui, "Saturation", &mut self.settings.saturation, 0.0..=2.0) {
+                            self.dirty = true;
+                        }
+                        if dial_f32(ui, "Brightness", &mut self.settings.brightness, -0.5..=0.5)
+                        {
+                            self.dirty = true;
+                        }
+                        if toggle_row(ui, "Invert", &mut self.settings.invert) {
+                            self.dirty = true;
+                        }
+                        if toggle_row(ui, "Color", &mut self.settings.color) {
+                            self.dirty = true;
+                        }
 
-                section(ui, "Characters");
-                for set in [Charset::Alphanumeric, Charset::Blocks, Charset::Punctuation] {
-                    if segment(
-                        ui,
-                        ui.available_width(),
-                        set.label(),
-                        self.settings.charset == set,
-                        self.reduced_motion,
-                    )
-                    .clicked()
-                    {
-                        self.settings.charset = set;
-                        self.dirty = true;
-                    }
-                }
+                        section(ui, "Characters");
+                        for set in [Charset::Alphanumeric, Charset::Blocks, Charset::Punctuation]
+                        {
+                            if segment(
+                                ui,
+                                ui.available_width(),
+                                set.label(),
+                                self.settings.charset == set,
+                                reduced,
+                            )
+                            .clicked()
+                            {
+                                self.settings.charset = set;
+                                self.dirty = true;
+                            }
+                        }
 
-                section(ui, "Dials");
-                if dial_u32(ui, "Columns", &mut self.settings.cols, 20..=240) {
-                    self.dirty = true;
-                }
-                if dial_f32(ui, "Contrast", &mut self.settings.contrast, 0.4..=2.4) {
-                    self.dirty = true;
-                }
-                if dial_f32(ui, "Saturation", &mut self.settings.saturation, 0.0..=2.0) {
-                    self.dirty = true;
-                }
-                if dial_f32(ui, "Brightness", &mut self.settings.brightness, -0.5..=0.5) {
-                    self.dirty = true;
-                }
+                        section(ui, "Mode");
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 6.0) / 2.0;
+                            if segment(ui, w, "Overlay", self.mode == Mode::Overlay, reduced)
+                                .clicked()
+                            {
+                                self.mode = Mode::Overlay;
+                            }
+                            if segment(ui, w, "ASCII", self.mode == Mode::Ascii, reduced)
+                                .clicked()
+                            {
+                                self.mode = Mode::Ascii;
+                            }
+                        });
 
-                ui.add_space(4.0);
-                if toggle_row(ui, "Invert", &mut self.settings.invert) {
-                    self.dirty = true;
-                }
-                if toggle_row(ui, "Color", &mut self.settings.color) {
-                    self.dirty = true;
-                }
-
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new("Drop PNG, JPEG, WebP, GIF, BMP, or TIFF. Dials resample the cache.")
-                        .size(12.0)
-                        .color(SAGE),
-                );
-                ui.add_space(12.0);
+                        section(ui, "Export");
+                        let kinds = [
+                            io::ExportKind::Txt,
+                            io::ExportKind::Png,
+                            io::ExportKind::Svg,
+                            io::ExportKind::Html,
+                            io::ExportKind::Ansi,
+                        ];
+                        let cell_w = (ui.available_width() - 12.0) / 3.0;
+                        ui.horizontal_wrapped(|ui| {
+                            for kind in kinds {
+                                if chip(ui, cell_w, kind.label(), reduced).clicked() {
+                                    self.save_export(kind);
+                                }
+                            }
+                        });
+                        ui.label(
+                            RichText::new("Drop PNG, JPEG, WebP, GIF, BMP, TIFF, or SVG.")
+                                .size(11.0)
+                                .color(SAGE),
+                        );
                     });
             });
 
@@ -353,47 +336,41 @@ impl eframe::App for App {
             .frame(Frame::new().fill(GROUND).inner_margin(Margin::same(16)))
             .show(ctx, |ui| {
                 let avail = ui.available_rect_before_wrap();
-                let scale = 0.95 + 0.05 * appear;
-                let layer = ui.layer_id();
-                if appear < 1.0 {
-                    let c = avail.center();
-                    ctx.set_transform_layer(
-                        layer,
-                        TSTransform::from_translation(c.to_vec2())
-                            * TSTransform::from_scaling(scale)
-                            * TSTransform::from_translation(-c.to_vec2()),
-                    );
-                } else {
-                    ctx.set_transform_layer(layer, TSTransform::IDENTITY);
-                }
-
                 if self.source.is_none() {
                     let (resp, painter) = ui.allocate_painter(avail.size(), Sense::click());
-                    let fill = fade(Color32::from_rgb(0x10, 0x11, 0x14), appear);
-                    painter.rect_filled(resp.rect, CornerRadius::same(4), fill);
+                    painter.rect_filled(
+                        resp.rect,
+                        CornerRadius::same(4),
+                        Color32::from_rgb(0x10, 0x11, 0x14),
+                    );
                     painter.rect_stroke(
                         resp.rect.shrink(10.0),
                         CornerRadius::ZERO,
-                        Stroke::new(1.0_f32, fade(CREAM.gamma_multiply(0.35), appear)),
+                        Stroke::new(1.0_f32, CREAM.gamma_multiply(0.35)),
                         egui::StrokeKind::Inside,
                     );
                     let c = resp.rect.center();
+                    let (title, sub) = if busy.is_some() {
+                        ("READING STILL", "the archive is decoding")
+                    } else {
+                        ("NO STILL LOADED", "drop a still into the archive")
+                    };
                     painter.text(
                         c - Vec2::new(0.0, 14.0),
                         egui::Align2::CENTER_CENTER,
-                        "NO STILL LOADED",
+                        title,
                         FontId::monospace(16.0),
-                        fade(CREAM, appear),
+                        CREAM,
                     );
                     painter.text(
                         c + Vec2::new(0.0, 12.0),
                         egui::Align2::CENTER_CENTER,
-                        "drop a still into the archive",
+                        sub,
                         FontId::monospace(13.0),
-                        fade(CREAM.gamma_multiply(0.55), appear),
+                        CREAM.gamma_multiply(0.55),
                     );
                     if resp.clicked() {
-                        self.open_dialog(ctx);
+                        self.open_dialog();
                     }
                     return;
                 }
@@ -406,7 +383,123 @@ impl eframe::App for App {
     }
 }
 
-fn paint_preview(ui: &egui::Ui, rect: Rect, app: &App) {
+fn spawn_pick(tx: Sender<Job>) {
+    thread::spawn(move || {
+        let picked = rfd::FileDialog::new()
+            .add_filter("Image", OPEN_FILTERS)
+            .pick_file();
+        match picked {
+            None => {
+                let _ = tx.send(Job::Idle);
+            }
+            Some(p) => match io::load_path(&p) {
+                Ok(img) => {
+                    let _ = tx.send(Job::Loaded {
+                        name: file_stem(&p),
+                        img,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(Job::Failed(e));
+                }
+            },
+        }
+    });
+}
+
+fn spawn_load_path(tx: Sender<Job>, path: PathBuf) {
+    thread::spawn(move || match io::load_path(&path) {
+        Ok(img) => {
+            let _ = tx.send(Job::Loaded {
+                name: file_stem(&path),
+                img,
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(Job::Failed(e));
+        }
+    });
+}
+
+fn spawn_load_bytes(tx: Sender<Job>, name: String, bytes: Vec<u8>) {
+    thread::spawn(move || match io::load_bytes(&bytes) {
+        Ok(img) => {
+            let _ = tx.send(Job::Loaded { name, img });
+        }
+        Err(e) => {
+            let _ = tx.send(Job::Failed(e));
+        }
+    });
+}
+
+fn spawn_save(
+    tx: Sender<Job>,
+    kind: io::ExportKind,
+    stem: String,
+    cols: u32,
+    rows: u32,
+    grid: Vec<Cell>,
+) {
+    thread::spawn(move || {
+        let name = format!("{stem}.{}", kind.ext());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(kind.label(), &[kind.ext()])
+            .set_file_name(&name)
+            .save_file()
+        else {
+            let _ = tx.send(Job::Idle);
+            return;
+        };
+        match io::encode(kind, cols, rows, &grid) {
+            Ok(bytes) => {
+                if let Err(e) = std::fs::write(&path, bytes) {
+                    let _ = tx.send(Job::Failed(format!("Could not write file: {e}")));
+                } else {
+                    let _ = tx.send(Job::Saved);
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Job::Failed(e));
+            }
+        }
+    });
+}
+
+fn brand(ui: &mut egui::Ui, reduced: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+    let font = FontId::monospace(11.0);
+    let job = |color: Color32| {
+        let mut job = egui::text::LayoutJob::default();
+        job.append(
+            "COSMIC ARCHIVE",
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color,
+                extra_letter_spacing: 2.2,
+                ..Default::default()
+            },
+        );
+        job
+    };
+    let painter = ui.painter();
+    let pos = Pos2::new(rect.left(), rect.top());
+    if !reduced {
+        painter.galley(
+            pos + Vec2::new(1.0, 0.0),
+            painter.layout_job(job(CORAL.gamma_multiply(0.75))),
+            CORAL,
+        );
+        painter.galley(
+            pos + Vec2::new(-1.0, 0.0),
+            painter.layout_job(job(TEAL.gamma_multiply(0.75))),
+            TEAL,
+        );
+    }
+    painter.galley(pos, painter.layout_job(job(CREAM)), CREAM);
+}
+
+fn paint_preview(ui: &egui::Ui, rect: Rect, app: &mut App) {
     let painter = ui.painter_at(rect);
     match app.mode {
         Mode::Overlay => {
@@ -427,36 +520,61 @@ fn paint_preview(ui: &egui::Ui, rect: Rect, app: &App) {
     if app.cols == 0 || app.rows == 0 {
         return;
     }
-    let font_size = rect.height() / app.rows as f32;
-    let font = FontId::monospace(font_size);
-    let gw = rect.width() / app.cols as f32;
-    for y in 0..app.rows {
-        let mut job = egui::text::LayoutJob::default();
-        job.wrap.max_width = f32::INFINITY;
-        let row = y * app.cols;
-        for x in 0..app.cols {
-            let cell = app.grid[(row + x) as usize];
-            let c = cell.color;
-            let mut buf = [0u8; 4];
-            job.append(
-                cell.ch.encode_utf8(&mut buf),
-                0.0,
-                egui::TextFormat {
-                    font_id: font.clone(),
-                    color: Color32::from_rgb(c[0], c[1], c[2]),
-                    extra_letter_spacing: gw - font_size * 0.6,
-                    ..Default::default()
-                },
-            );
+    let size = rect.size();
+    let miss = match &app.preview {
+        Some((gen, cached, _)) => *gen != app.grid_gen || (cached.x - size.x).abs() > 0.5,
+        None => true,
+    };
+    if miss {
+        let font_size = rect.height() / app.rows as f32;
+        let font = FontId::monospace(font_size);
+        let gw = rect.width() / app.cols as f32;
+        let mut galleys = Vec::with_capacity(app.rows as usize);
+        for y in 0..app.rows {
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = f32::INFINITY;
+            let row = y * app.cols;
+            let mut x = 0;
+            while x < app.cols {
+                let cell = app.grid[(row + x) as usize];
+                let mut run = String::new();
+                run.push(cell.ch);
+                x += 1;
+                while x < app.cols {
+                    let next = app.grid[(row + x) as usize];
+                    if next.color != cell.color {
+                        break;
+                    }
+                    run.push(next.ch);
+                    x += 1;
+                }
+                let c = cell.color;
+                job.append(
+                    &run,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: font.clone(),
+                        color: Color32::from_rgb(c[0], c[1], c[2]),
+                        extra_letter_spacing: gw - font_size * 0.6,
+                        ..Default::default()
+                    },
+                );
+            }
+            galleys.push(painter.layout_job(job));
         }
-        let galley = painter.layout_job(job);
-        let pos = Pos2::new(rect.left(), rect.top() + y as f32 * font_size);
-        painter.galley(pos, galley, CREAM);
+        app.preview = Some((app.grid_gen, size, galleys));
+    }
+    if let Some((_, _, galleys)) = &app.preview {
+        let font_size = rect.height() / app.rows as f32;
+        for (y, galley) in galleys.iter().enumerate() {
+            let pos = Pos2::new(rect.left(), rect.top() + y as f32 * font_size);
+            painter.galley(pos, galley.clone(), CREAM);
+        }
     }
 }
 
 fn section(ui: &mut egui::Ui, name: &str) {
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     ui.label(
         RichText::new(name)
             .size(11.0)
@@ -506,7 +624,7 @@ fn press_button(ui: &mut egui::Ui, label: &str, reduced: bool) -> egui::Response
 }
 
 fn chip(ui: &mut egui::Ui, width: f32, label: &str, reduced: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::click());
     let s = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
     let r = Rect::from_center_size(rect.center(), rect.size() * s);
     let fill = if resp.hovered() {
@@ -532,7 +650,7 @@ fn chip(ui: &mut egui::Ui, width: f32, label: &str, reduced: bool) -> egui::Resp
 }
 
 fn segment(ui: &mut egui::Ui, width: f32, label: &str, on: bool, reduced: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, HIT), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
     let s = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
     let r = Rect::from_center_size(rect.center(), rect.size() * s);
     let fill = if on {
@@ -542,11 +660,15 @@ fn segment(ui: &mut egui::Ui, width: f32, label: &str, on: bool, reduced: bool) 
     } else {
         Color32::from_rgb(0x1b, 0x20, 0x25)
     };
-    let stroke = if on { TEAL } else { Color32::from_rgb(0x3a, 0x42, 0x48) };
-    ui.painter().rect_filled(r, CornerRadius::same(8), fill);
+    let stroke = if on {
+        TEAL
+    } else {
+        Color32::from_rgb(0x3a, 0x42, 0x48)
+    };
+    ui.painter().rect_filled(r, CornerRadius::same(6), fill);
     ui.painter().rect_stroke(
         r,
-        CornerRadius::same(8),
+        CornerRadius::same(6),
         Stroke::new(1.0_f32, stroke),
         egui::StrokeKind::Middle,
     );
@@ -554,13 +676,18 @@ fn segment(ui: &mut egui::Ui, width: f32, label: &str, on: bool, reduced: bool) 
         r.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        FontId::monospace(13.0),
+        FontId::monospace(12.0),
         if on { CREAM } else { SAGE },
     );
     resp
 }
 
-fn dial_u32(ui: &mut egui::Ui, label: &str, value: &mut u32, range: std::ops::RangeInclusive<u32>) -> bool {
+fn dial_u32(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> bool {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).size(13.0).color(CREAM));
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -580,7 +707,12 @@ fn dial_u32(ui: &mut egui::Ui, label: &str, value: &mut u32, range: std::ops::Ra
     .changed()
 }
 
-fn dial_f32(ui: &mut egui::Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>) -> bool {
+fn dial_f32(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> bool {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).size(13.0).color(CREAM));
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -592,11 +724,12 @@ fn dial_f32(ui: &mut egui::Ui, label: &str, value: &mut f32, range: std::ops::Ra
             );
         });
     });
-    ui.add(egui::Slider::new(value, range).show_value(false)).changed()
+    ui.add(egui::Slider::new(value, range).show_value(false))
+        .changed()
 }
 
 fn toggle_row(ui: &mut egui::Ui, label: &str, on: &mut bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), HIT), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
     if resp.clicked() {
         *on = !*on;
     }
@@ -604,21 +737,30 @@ fn toggle_row(ui: &mut egui::Ui, label: &str, on: &mut bool) -> bool {
         Pos2::new(rect.left(), rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
-        FontId::proportional(14.0),
+        FontId::proportional(13.0),
         CREAM,
     );
-    let knob_w = 44.0;
+    let knob_w = 40.0;
     let knob = Rect::from_center_size(
         Pos2::new(rect.right() - knob_w / 2.0 - 2.0, rect.center().y),
-        Vec2::new(knob_w, 24.0),
+        Vec2::new(knob_w, 22.0),
     );
     ui.painter().rect_filled(
         knob,
-        CornerRadius::same(12),
-        if *on { TEAL } else { Color32::from_rgb(0x3a, 0x42, 0x48) },
+        CornerRadius::same(11),
+        if *on {
+            TEAL
+        } else {
+            Color32::from_rgb(0x3a, 0x42, 0x48)
+        },
     );
-    let x = if *on { knob.right() - 12.0 } else { knob.left() + 12.0 };
-    ui.painter().circle_filled(Pos2::new(x, knob.center().y), 8.0, CREAM);
+    let x = if *on {
+        knob.right() - 11.0
+    } else {
+        knob.left() + 11.0
+    };
+    ui.painter()
+        .circle_filled(Pos2::new(x, knob.center().y), 7.0, CREAM);
     resp.clicked()
 }
 
@@ -640,23 +782,10 @@ fn file_stem(path: &Path) -> String {
         .to_string()
 }
 
-fn fade(c: Color32, t: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * t).round() as u8)
-}
-
 fn reduced_motion() -> bool {
     if let Ok(v) = std::env::var("PREFERS_REDUCED_MOTION") {
         let v = v.to_ascii_lowercase();
         if matches!(v.as_str(), "1" | "true" | "yes") {
-            return true;
-        }
-    }
-    if let Ok(out) = std::process::Command::new("hyprctl")
-        .args(["getoption", "animations:enabled", "-j"])
-        .output()
-    {
-        let s = String::from_utf8_lossy(&out.stdout);
-        if s.contains("\"int\": 0") || s.contains("\"int\":0") {
             return true;
         }
     }
@@ -685,14 +814,14 @@ fn apply_theme(ctx: &egui::Context) {
     v.widgets.hovered.bg_fill = Color32::from_rgb(0x2e, 0x36, 0x3c);
     v.widgets.active.bg_fill = Color32::from_rgb(0x1a, 0x3a, 0x3a);
     v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(0x3a, 0x42, 0x48));
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, BLUE);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, TEAL);
     v.widgets.active.bg_stroke = Stroke::new(1.0_f32, TEAL);
     ctx.set_visuals(v);
 
     ctx.style_mut(|s| {
         s.spacing.interact_size = Vec2::new(40.0, HIT);
-        s.spacing.slider_width = 260.0;
-        s.spacing.button_padding = Vec2::new(12.0, 10.0);
+        s.spacing.slider_width = 240.0;
+        s.spacing.button_padding = Vec2::new(12.0, 8.0);
         s.interaction.tooltip_delay = 0.0;
         s.interaction.tooltip_grace_time = 0.0;
         s.animation_time = 0.12;

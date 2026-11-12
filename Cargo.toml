@@ -1,0 +1,10 @@
+[package]
+name = "ascii-image-generator"
+version = "0.1.0"
+edition = "2021"
+description = "ASCII Image Generator"
+
+[dependencies]
+eframe = "0.32"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rfd = "0.15"

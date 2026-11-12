@@ -180,4 +180,16 @@ mod tests {
         assert_eq!(cells.len(), 100);
         assert!(cells.iter().all(|c| c.ch == '█'));
     }
+
+    #[test]
+    fn convert_invert_maps_white_to_space() {
+        let img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        s.charset = Charset::Blocks;
+        s.invert = true;
+        s.color = false;
+        let (_, _, cells) = convert(&img, &s);
+        assert!(cells.iter().all(|c| c.ch == ' '));
+    }
 }

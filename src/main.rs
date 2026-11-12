@@ -1,4 +1,5 @@
 mod ascii;
+mod io;
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +14,7 @@ use image::RgbaImage;
 const GROUND: Color32 = Color32::from_rgb(0x05, 0x05, 0x08);
 const CHARCOAL: Color32 = Color32::from_rgb(0x24, 0x2a, 0x30);
 const CREAM: Color32 = Color32::from_rgb(0xf4, 0xf3, 0xe8);
-const MUTED: Color32 = Color32::from_rgb(0x9a, 0x9b, 0x92);
+const SAGE: Color32 = Color32::from_rgb(0x93, 0x9e, 0x7a);
 const TEAL: Color32 = Color32::from_rgb(0x3f, 0xb6, 0xaf);
 const BLUE: Color32 = Color32::from_rgb(0x42, 0x77, 0xa2);
 const CORAL: Color32 = Color32::from_rgb(0xd9, 0x63, 0x50);
@@ -24,11 +25,11 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([720.0, 480.0])
-            .with_title("ASCII Image Generator"),
+            .with_title("Cosmic Archive — ASCII"),
         ..Default::default()
     };
     eframe::run_native(
-        "ASCII Image Generator",
+        "Cosmic Archive — ASCII",
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
@@ -82,28 +83,16 @@ impl App {
     }
 
     fn load_path(&mut self, path: &Path, ctx: &egui::Context) {
-        match image::open(path) {
-            Ok(dyn_img) => {
-                let mut img = dyn_img.to_rgba8();
-                if img.width() > 2048 {
-                    let h = (img.height() as u64 * 2048 / img.width().max(1) as u64).max(1) as u32;
-                    img = image::imageops::resize(
-                        &img,
-                        2048,
-                        h,
-                        image::imageops::FilterType::Triangle,
-                    );
-                }
-                self.set_source(img, file_stem(path), ctx);
-            }
-            Err(e) => self.error = Some(format!("Could not load image: {e}")),
+        match io::load_path(path) {
+            Ok(img) => self.set_source(img, file_stem(path), ctx),
+            Err(e) => self.error = Some(e),
         }
     }
 
     fn load_bytes(&mut self, name: &str, bytes: &[u8], ctx: &egui::Context) {
-        match image::load_from_memory(bytes) {
-            Ok(dyn_img) => self.set_source(dyn_img.to_rgba8(), name.to_string(), ctx),
-            Err(e) => self.error = Some(format!("Could not load image: {e}")),
+        match io::load_bytes(bytes) {
+            Ok(img) => self.set_source(img, name.to_string(), ctx),
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -156,10 +145,39 @@ impl App {
 
     fn open_dialog(&mut self, ctx: &egui::Context) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Image", &["png", "jpg", "jpeg", "webp", "bmp"])
+            .add_filter(
+                "Image",
+                &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg"],
+            )
             .pick_file()
         {
             self.load_path(&path, ctx);
+        }
+    }
+
+    fn save_export(&mut self, kind: io::ExportKind) {
+        if self.grid.is_empty() {
+            self.error = Some("Load a still first.".into());
+            return;
+        }
+        let stem = Path::new(&self.source_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ascii");
+        let name = format!("{stem}.{}", kind.ext());
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter(kind.label(), &[kind.ext()])
+            .set_file_name(&name)
+            .save_file()
+        {
+            match io::encode(kind, self.cols, self.rows, &self.grid) {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(&path, bytes) {
+                        self.error = Some(format!("Could not write file: {e}"));
+                    }
+                }
+                Err(e) => self.error = Some(e),
+            }
         }
     }
 }
@@ -186,19 +204,59 @@ impl eframe::App for App {
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
+                let seam = ui.max_rect();
+                ui.painter().vline(
+                    seam.left() + 0.5,
+                    seam.y_range(),
+                    Stroke::new(1.0_f32, TEAL.gamma_multiply(0.45)),
+                );
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 10.0);
+                {
+                    let (rect, _) =
+                        ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+                    let font = FontId::monospace(11.0);
+                    let job = |color: Color32| {
+                        let mut job = egui::text::LayoutJob::default();
+                        job.append(
+                            "COSMIC ARCHIVE",
+                            0.0,
+                            egui::TextFormat {
+                                font_id: font.clone(),
+                                color,
+                                extra_letter_spacing: 2.2,
+                                ..Default::default()
+                            },
+                        );
+                        job
+                    };
+                    let painter = ui.painter();
+                    let pos = Pos2::new(rect.left(), rect.top());
+                    if !self.reduced_motion {
+                        painter.galley(
+                            pos + Vec2::new(1.0, 0.0),
+                            painter.layout_job(job(CORAL.gamma_multiply(0.75))),
+                            CORAL,
+                        );
+                        painter.galley(
+                            pos + Vec2::new(-1.0, 0.0),
+                            painter.layout_job(job(TEAL.gamma_multiply(0.75))),
+                            TEAL,
+                        );
+                    }
+                    painter.galley(pos, painter.layout_job(job(CREAM)), CREAM);
+                }
                 ui.label(
-                    RichText::new("ASCII")
-                        .size(11.0)
-                        .color(TEAL)
-                        .extra_letter_spacing(1.4),
+                    RichText::new("ASCII stills")
+                        .family(FontFamily::Monospace)
+                        .size(20.0)
+                        .color(CREAM)
+                        .extra_letter_spacing(0.6),
                 );
-                ui.label(RichText::new("Image Generator").size(22.0).color(CREAM));
                 if !self.source_name.is_empty() {
-                    ui.label(RichText::new(&self.source_name).size(13.0).color(MUTED));
+                    ui.label(RichText::new(&self.source_name).size(13.0).color(SAGE));
                 }
                 ui.add_space(4.0);
                 if press_button(ui, "Open image", self.reduced_motion).clicked() {
@@ -207,6 +265,26 @@ impl eframe::App for App {
                 if let Some(err) = &self.error {
                     ui.label(RichText::new(err).color(CORAL).size(13.0));
                 }
+
+                section(ui, "Export");
+                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                let kinds = [
+                    io::ExportKind::Txt,
+                    io::ExportKind::Png,
+                    io::ExportKind::Svg,
+                    io::ExportKind::Html,
+                    io::ExportKind::Ansi,
+                ];
+                let cell_w = (ui.available_width() - 12.0) / 3.0;
+                ui.horizontal_wrapped(|ui| {
+                    for kind in kinds {
+                        if chip(ui, cell_w, kind.label(), self.reduced_motion).clicked()
+                        {
+                            self.save_export(kind);
+                        }
+                    }
+                });
+                ui.spacing_mut().item_spacing = Vec2::new(8.0, 10.0);
 
                 section(ui, "Mode");
                 ui.horizontal(|ui| {
@@ -263,9 +341,9 @@ impl eframe::App for App {
 
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("Drop a PNG, JPEG, or WebP on the preview. Decoded once; dials resample the cache.")
+                    RichText::new("Drop PNG, JPEG, WebP, GIF, BMP, or TIFF. Dials resample the cache.")
                         .size(12.0)
-                        .color(MUTED),
+                        .color(SAGE),
                 );
                 ui.add_space(12.0);
                     });
@@ -292,19 +370,27 @@ impl eframe::App for App {
                 if self.source.is_none() {
                     let (resp, painter) = ui.allocate_painter(avail.size(), Sense::click());
                     let fill = fade(Color32::from_rgb(0x10, 0x11, 0x14), appear);
-                    painter.rect_filled(resp.rect, CornerRadius::same(8), fill);
+                    painter.rect_filled(resp.rect, CornerRadius::same(4), fill);
                     painter.rect_stroke(
                         resp.rect.shrink(10.0),
-                        CornerRadius::same(6),
-                        Stroke::new(1.0_f32, fade(BLUE, appear * 0.7)),
+                        CornerRadius::ZERO,
+                        Stroke::new(1.0_f32, fade(CREAM.gamma_multiply(0.35), appear)),
                         egui::StrokeKind::Inside,
                     );
+                    let c = resp.rect.center();
                     painter.text(
-                        resp.rect.center(),
+                        c - Vec2::new(0.0, 14.0),
                         egui::Align2::CENTER_CENTER,
-                        "Drop an image here\nor Open image",
-                        FontId::proportional(18.0),
+                        "NO STILL LOADED",
+                        FontId::monospace(16.0),
                         fade(CREAM, appear),
+                    );
+                    painter.text(
+                        c + Vec2::new(0.0, 12.0),
+                        egui::Align2::CENTER_CENTER,
+                        "drop a still into the archive",
+                        FontId::monospace(13.0),
+                        fade(CREAM.gamma_multiply(0.55), appear),
                     );
                     if resp.clicked() {
                         self.open_dialog(ctx);
@@ -374,7 +460,7 @@ fn section(ui: &mut egui::Ui, name: &str) {
     ui.label(
         RichText::new(name)
             .size(11.0)
-            .color(MUTED)
+            .color(SAGE)
             .extra_letter_spacing(0.8),
     );
 }
@@ -419,6 +505,32 @@ fn press_button(ui: &mut egui::Ui, label: &str, reduced: bool) -> egui::Response
     resp
 }
 
+fn chip(ui: &mut egui::Ui, width: f32, label: &str, reduced: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
+    let s = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
+    let r = Rect::from_center_size(rect.center(), rect.size() * s);
+    let fill = if resp.hovered() {
+        Color32::from_rgb(0x2e, 0x36, 0x3c)
+    } else {
+        Color32::from_rgb(0x1b, 0x20, 0x25)
+    };
+    ui.painter().rect_filled(r, CornerRadius::same(4), fill);
+    ui.painter().rect_stroke(
+        r,
+        CornerRadius::same(4),
+        Stroke::new(1.0_f32, TEAL.gamma_multiply(0.45)),
+        egui::StrokeKind::Middle,
+    );
+    ui.painter().text(
+        r.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::monospace(12.0),
+        CREAM,
+    );
+    resp
+}
+
 fn segment(ui: &mut egui::Ui, width: f32, label: &str, on: bool, reduced: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, HIT), Sense::click());
     let s = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
@@ -443,7 +555,7 @@ fn segment(ui: &mut egui::Ui, width: f32, label: &str, on: bool, reduced: bool) 
         egui::Align2::CENTER_CENTER,
         label,
         FontId::monospace(13.0),
-        if on { CREAM } else { MUTED },
+        if on { CREAM } else { SAGE },
     );
     resp
 }

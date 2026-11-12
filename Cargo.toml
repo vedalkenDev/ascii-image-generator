@@ -6,5 +6,6 @@ description = "ASCII Image Generator"
 
 [dependencies]
 eframe = "0.32"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
+jpeg-decoder = { version = "0.3", default-features = false }
 rfd = "0.15"

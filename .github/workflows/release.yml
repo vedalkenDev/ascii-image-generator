@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Stage exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/ascii-image-generator.exe dist/Cosmic-Archive-ASCII-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/Cosmic-Archive-ASCII-windows-x64.exe
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build Apple Silicon
+        run: cargo build --release --target aarch64-apple-darwin
+      - name: Build Intel
+        run: cargo build --release --target x86_64-apple-darwin
+      - name: Pack dmg
+        run: bash pack/macos-dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/Cosmic-Archive-ASCII-macos.dmg
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/windows-exe/Cosmic-Archive-ASCII-windows-x64.exe
+            artifacts/macos-dmg/Cosmic-Archive-ASCII-macos.dmg
+          generate_release_notes: true
+          fail_on_unmatched_files: true

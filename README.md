@@ -1,8 +1,17 @@
 # Cosmic Archive — ASCII
 
-A Linux desktop stills converter. Drop a photo, pick a look, get glyphs you can copy or save.
+A desktop stills converter. Drop a photo, pick a look, get glyphs you can copy or save.
 
 This is the ASCII generator for [Cosmic Archive](https://vedalken.dev): cream on near-black, visor colour as light, ASCII as the medium. It is not a photo editor.
+
+## Download
+
+Built installers live on the [v0.1.0 release](https://github.com/vedalkenDev/ascii-image-generator/releases/tag/v0.1.0):
+
+- [Windows x64 `.exe`](https://github.com/vedalkenDev/ascii-image-generator/releases/download/v0.1.0/Cosmic-Archive-ASCII-windows-x64.exe)
+- [macOS `.dmg`](https://github.com/vedalkenDev/ascii-image-generator/releases/download/v0.1.0/Cosmic-Archive-ASCII-macos.dmg) (Intel and Apple Silicon)
+
+The Windows build is a single unsigned exe. On macOS, right-click Open the first time — the disk image is unsigned, so Gatekeeper will warn. Linux still builds from source below.
 
 ## Looks
 

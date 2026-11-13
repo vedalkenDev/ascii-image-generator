@@ -1,6 +1,9 @@
 use image::RgbaImage;
 
-const CHAR_ASPECT: f32 = 0.5;
+pub const CHAR_ASPECT: f32 = 0.5;
+/// Noto Sans Mono advance / em. Glyphs sized to cell height are wider than
+/// a 1:2 cell, so high-col CHARS overlapped and moiré-hatched.
+pub const MONO_ADVANCE: f32 = 0.6;
 const VISOR_RAMP: [[u8; 3]; 6] = [
     [0x59, 0x2a, 0xa4],
     [0x42, 0x77, 0xa2],
@@ -12,8 +15,13 @@ const VISOR_RAMP: [[u8; 3]; 6] = [
 const CREAM_RGB: [u8; 3] = [0xf4, 0xf3, 0xe8];
 const GROUND_RGB: [u8; 3] = [0x05, 0x05, 0x08];
 const CHARCOAL_RGB: [u8; 3] = [0x24, 0x2a, 0x30];
+const SAGE_RGB: [u8; 3] = [0x93, 0x9e, 0x7a];
+const TEAL_RGB: [u8; 3] = [0x3f, 0xb6, 0xaf];
+const CORAL_RGB: [u8; 3] = [0xd9, 0x63, 0x50];
 const AMBER_RGB: [u8; 3] = [0xc1, 0x8d, 0x5d];
 const AMBER_LO: [u8; 3] = [0x18, 0x0e, 0x06];
+const TEAL_LO: [u8; 3] = [0x06, 0x14, 0x14];
+const CORAL_LO: [u8; 3] = [0x16, 0x08, 0x08];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Charset {
@@ -43,15 +51,21 @@ pub enum ColorKind {
     Visor,
     Amber,
     Cream,
+    Teal,
+    Coral,
+    Sage,
     Duo,
 }
 
 impl ColorKind {
-    pub const ALL: [ColorKind; 5] = [
+    pub const ALL: [ColorKind; 8] = [
         ColorKind::Source,
         ColorKind::Visor,
         ColorKind::Amber,
         ColorKind::Cream,
+        ColorKind::Teal,
+        ColorKind::Coral,
+        ColorKind::Sage,
         ColorKind::Duo,
     ];
 
@@ -61,6 +75,9 @@ impl ColorKind {
             Self::Visor => "VISOR",
             Self::Amber => "AMBER",
             Self::Cream => "CREAM",
+            Self::Teal => "TEAL",
+            Self::Coral => "CORAL",
+            Self::Sage => "SAGE",
             Self::Duo => "DUO",
         }
     }
@@ -94,10 +111,21 @@ pub enum Look {
     Blocks,
     Crt,
     Ansi,
+    Dither,
+    Hatch,
+    Scan,
 }
 
 impl Look {
-    pub const ALL: [Look; 4] = [Look::Visor, Look::Blocks, Look::Crt, Look::Ansi];
+    pub const ALL: [Look; 7] = [
+        Look::Visor,
+        Look::Blocks,
+        Look::Crt,
+        Look::Ansi,
+        Look::Dither,
+        Look::Hatch,
+        Look::Scan,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -105,43 +133,40 @@ impl Look {
             Self::Blocks => "BLOCKS",
             Self::Crt => "CRT",
             Self::Ansi => "ANSI",
+            Self::Dither => "DITHER",
+            Self::Hatch => "HATCH",
+            Self::Scan => "SCAN",
         }
     }
 
     pub fn knob(self) -> (&'static str, std::ops::RangeInclusive<f32>) {
         match self {
-            Self::Visor | Self::Blocks => ("weight", 0.4..=2.4),
-            Self::Crt => ("glow", -0.5..=0.5),
+            Self::Visor | Self::Blocks | Self::Dither | Self::Hatch => ("weight", 0.4..=4.0),
+            Self::Crt | Self::Scan => ("glow", -0.5..=0.5),
             Self::Ansi => ("chroma", 0.0..=2.0),
         }
     }
 
     pub fn apply(self, s: &mut Settings) {
+        s.look = self;
         s.charset = match self {
-            Self::Visor | Self::Blocks => Charset::Blocks,
+            Self::Visor | Self::Blocks | Self::Dither | Self::Hatch | Self::Scan => Charset::Blocks,
             Self::Crt => Charset::Punctuation,
             Self::Ansi => Charset::Alphanumeric,
         };
         s.color_kind = match self {
             Self::Visor => ColorKind::Visor,
             Self::Crt => ColorKind::Amber,
-            Self::Blocks | Self::Ansi => ColorKind::Source,
+            Self::Blocks | Self::Ansi | Self::Dither => ColorKind::Source,
+            Self::Hatch => ColorKind::Sage,
+            Self::Scan => ColorKind::Teal,
         };
         s.color = !matches!(self, Self::Crt);
-        match self {
-            Self::Visor | Self::Blocks => {
-                s.saturation = 1.0;
-                s.brightness = 0.0;
-            }
-            Self::Crt => {
-                s.contrast = 1.0;
-                s.saturation = 0.0;
-            }
-            Self::Ansi => {
-                s.contrast = 1.0;
-                s.saturation = 1.0;
-                s.brightness = 0.0;
-            }
+        s.contrast = 1.0;
+        s.saturation = 1.0;
+        s.brightness = 0.0;
+        if matches!(self, Self::Crt) {
+            s.saturation = 0.0;
         }
     }
 }
@@ -151,6 +176,7 @@ pub struct Settings {
     pub cols: u32,
     pub charset: Charset,
     pub mark: Mark,
+    pub look: Look,
     pub contrast: f32,
     pub saturation: f32,
     pub brightness: f32,
@@ -167,6 +193,7 @@ impl Default for Settings {
             cols: 80,
             charset: Charset::Blocks,
             mark: Mark::Cells,
+            look: Look::Visor,
             contrast: 1.0,
             saturation: 1.0,
             brightness: 0.0,
@@ -193,18 +220,18 @@ pub fn convert(img: &RgbaImage, s: &Settings) -> (u32, u32, Vec<Cell>) {
     let cell_h = img.height() as f32 / rows as f32;
     let ramp = s.charset.ramp();
     let mut out = Vec::with_capacity((cols * rows) as usize);
-
     for y in 0..rows {
         for x in 0..cols {
-            let rgb = sample(img, x, y, cell_w, cell_h);
-            let rgb = enhance(rgb, s);
+            let rgb = enhance(sample(img, x, y, cell_w, cell_h), s);
             let mut yv = luma(rgb);
             if s.invert {
                 yv = 1.0 - yv;
             }
-            let ch = ramp_char(ramp, yv);
-            let color = cell_color(s, rgb, yv);
-            out.push(Cell { ch, color });
+            let ch = glyph(s, ramp, x, y, yv);
+            out.push(Cell {
+                ch,
+                color: cell_color(s, rgb, yv),
+            });
         }
     }
     (cols, rows, out)
@@ -217,6 +244,45 @@ pub fn ramp_char(ramp: &[char], luma: f32) -> char {
     let t = luma.clamp(0.0, 1.0);
     let i = ((t * ramp.len() as f32) as usize).min(ramp.len() - 1);
     ramp[i]
+}
+
+fn glyph(s: &Settings, ramp: &[char], x: u32, y: u32, yv: f32) -> char {
+    match s.look {
+        Look::Dither => {
+            if yv > bayer4(x, y) {
+                '█'
+            } else {
+                ' '
+            }
+        }
+        Look::Hatch => {
+            let period = 5u32;
+            let slot = (x + y) % period;
+            if yv * period as f32 > slot as f32 {
+                '█'
+            } else {
+                ' '
+            }
+        }
+        Look::Scan => {
+            if y % 2 == 1 {
+                ' '
+            } else {
+                ramp_char(ramp, yv)
+            }
+        }
+        _ => ramp_char(ramp, yv),
+    }
+}
+
+fn bayer4(x: u32, y: u32) -> f32 {
+    const M: [[f32; 4]; 4] = [
+        [0.0 / 16.0, 8.0 / 16.0, 2.0 / 16.0, 10.0 / 16.0],
+        [12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0, 6.0 / 16.0],
+        [3.0 / 16.0, 11.0 / 16.0, 1.0 / 16.0, 9.0 / 16.0],
+        [15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0, 5.0 / 16.0],
+    ];
+    M[(y % 4) as usize][(x % 4) as usize]
 }
 
 fn sample(img: &RgbaImage, cx: u32, cy: u32, cw: f32, ch: f32) -> [f32; 3] {
@@ -271,8 +337,18 @@ fn to_u8(rgb: [f32; 3]) -> [u8; 3] {
 fn cell_color(s: &Settings, rgb: [f32; 3], yv: f32) -> [u8; 3] {
     match s.color_kind {
         ColorKind::Visor => visor_rgb(yv),
-        ColorKind::Amber => amber_rgb(yv),
+        ColorKind::Amber => phosphor(AMBER_LO, AMBER_RGB, CREAM_RGB, yv),
+        ColorKind::Teal => phosphor(TEAL_LO, TEAL_RGB, CREAM_RGB, yv),
+        ColorKind::Coral => phosphor(CORAL_LO, CORAL_RGB, CREAM_RGB, yv),
         ColorKind::Cream => lerp_u8(GROUND_RGB, CREAM_RGB, yv.clamp(0.0, 1.0)),
+        ColorKind::Sage => {
+            let y = yv.clamp(0.0, 1.0);
+            if y < 0.5 {
+                lerp_u8(GROUND_RGB, SAGE_RGB, y * 2.0)
+            } else {
+                lerp_u8(SAGE_RGB, CREAM_RGB, (y - 0.5) * 2.0)
+            }
+        }
         ColorKind::Duo => lerp_u8(s.duo_ink, s.duo_paper, yv.clamp(0.0, 1.0)),
         ColorKind::Source if s.color => to_u8(rgb),
         ColorKind::Source => {
@@ -293,12 +369,12 @@ fn visor_rgb(y: f32) -> [u8; 3] {
     lerp_u8(mixed, CREAM_RGB, y.clamp(0.0, 1.0) * 0.22)
 }
 
-fn amber_rgb(y: f32) -> [u8; 3] {
+fn phosphor(lo: [u8; 3], mid: [u8; 3], hi: [u8; 3], y: f32) -> [u8; 3] {
     let y = y.clamp(0.0, 1.0);
     if y > 0.85 {
-        lerp_u8(AMBER_RGB, CREAM_RGB, (y - 0.85) / 0.15)
+        lerp_u8(mid, hi, (y - 0.85) / 0.15)
     } else {
-        lerp_u8(AMBER_LO, AMBER_RGB, y / 0.85)
+        lerp_u8(lo, mid, y / 0.85)
     }
 }
 
@@ -442,4 +518,68 @@ mod tests {
         let (_, _, cells) = convert(&img, &s);
         assert!(cells.iter().any(|c| c.color[0] > c.color[1] && c.color[0] > c.color[2]));
     }
+
+    #[test]
+    fn dither_is_binary_occupancy() {
+        let img = RgbaImage::from_pixel(40, 40, image::Rgba([128, 128, 128, 255]));
+        let mut s = Settings::default();
+        s.cols = 16;
+        Look::Dither.apply(&mut s);
+        let (_, _, cells) = convert(&img, &s);
+        assert!(cells.iter().any(|c| c.ch == ' '));
+        assert!(cells.iter().any(|c| c.ch == '█'));
+        assert!(cells.iter().all(|c| c.ch == ' ' || c.ch == '█'));
+    }
+
+    #[test]
+    fn hatch_is_diagonal_occupancy() {
+        let img = RgbaImage::from_pixel(40, 40, image::Rgba([200, 200, 200, 255]));
+        let mut s = Settings::default();
+        s.cols = 16;
+        Look::Hatch.apply(&mut s);
+        let (cols, _, cells) = convert(&img, &s);
+        assert!(cells.iter().any(|c| c.ch == ' '));
+        assert!(cells.iter().any(|c| c.ch == '█'));
+        let mut diagonal = 0;
+        for (i, cell) in cells.iter().enumerate() {
+            if cell.ch == '█' {
+                let x = i as u32 % cols;
+                let y = i as u32 / cols;
+                if (x + y) % 5 == 0 {
+                    diagonal += 1;
+                }
+            }
+        }
+        assert!(diagonal > 0);
+    }
+
+    #[test]
+    fn scan_blanks_odd_rows() {
+        let img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        Look::Scan.apply(&mut s);
+        let (cols, rows, cells) = convert(&img, &s);
+        for y in 0..rows {
+            let row = &cells[(y * cols) as usize..((y + 1) * cols) as usize];
+            if y % 2 == 1 {
+                assert!(row.iter().all(|c| c.ch == ' '));
+            } else {
+                assert!(row.iter().any(|c| c.ch != ' '));
+            }
+        }
+    }
+
+    #[test]
+    fn teal_and_coral_highlights_are_cream() {
+        let img = RgbaImage::from_pixel(20, 20, image::Rgba([255, 255, 255, 255]));
+        for kind in [ColorKind::Teal, ColorKind::Coral, ColorKind::Sage] {
+            let mut s = Settings::default();
+            s.cols = 8;
+            s.color_kind = kind;
+            let (_, _, cells) = convert(&img, &s);
+            assert!(cells.iter().all(|c| c.color == CREAM_RGB), "{:?} {:?}", kind.name(), cells[0].color);
+        }
+    }
+
 }

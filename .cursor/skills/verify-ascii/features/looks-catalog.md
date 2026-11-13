@@ -1,20 +1,23 @@
 # Looks catalog
 
-Looks catalog is four live thumbs of the loaded still (Visor, Blocks, CRT, ANSI). Clicking a card applies that look to the theater. Default look on launch is Visor.
+Looks catalog is seven live thumbs of the loaded still (Visor, Blocks, CRT, ANSI, Dither, Hatch, Scan) in a three-column grid. Clicking a card applies that look to the theater. Default look on launch is Visor.
 
 ## Sub-features
 
-- `looks-thumbs` shows four thumbs of the current still, not placeholder names alone.
+- `looks-thumbs` shows seven thumbs of the current still, not placeholder names alone.
 - `looks-visor` applies Visor (block glyphs, visor palette).
 - `looks-blocks` applies Blocks (block glyphs, the still's colour).
 - `looks-crt` applies CRT (amber phosphor punctuation).
 - `looks-ansi` applies ANSI (letter and number glyphs, the still's colour).
-- `looks-selected` shows the active card with a cream border and the plate line `VISOR` / `BLOCKS` / `CRT` / `ANSI`.
+- `looks-dither` applies Dither (Bayer stipple, occupied or empty).
+- `looks-hatch` applies Hatch (diagonal occupancy, sage phosphor).
+- `looks-scan` applies Scan (interlace rows, teal phosphor).
+- `looks-selected` shows the active card with a cream border and the plate line `VISOR` / `BLOCKS` / `CRT` / `ANSI` / `DITHER` / `HATCH` / `SCAN`.
 
 ## How to get to it (user POV)
 
 - With a still loaded, read the `:: LOOK` cards in the sidebar.
-- Click `VISOR`, `BLOCKS`, `CRT`, or `ANSI`.
+- Click `VISOR`, `BLOCKS`, `CRT`, `ANSI`, `DITHER`, `HATCH`, or `SCAN`.
 
 ## Driving it with verify-ascii
 
@@ -24,13 +27,16 @@ Preconditions:
 - `verify-ascii doctor` is ok.
 - Theater is not `NO STILL LOADED`.
 
-- **Thumbs present.** Capture the default Visor state. Run `.cursor/skills/verify-ascii/scripts/verify-ascii screenshot looks-visor`. The sidebar shows four thumbs of `sample.png`. Visor's card is cream-bordered. The plate reads `VISOR` and a column×row count. Default MARK is CELLS: theater is a visor-palette mosaic, not the raw rainbow of Blocks. Switch to CHARS (`click mark.chars`) to assert block glyphs instead.
+- **Thumbs present.** Capture the default Visor state. Run `.cursor/skills/verify-ascii/scripts/verify-ascii screenshot looks-visor`. The sidebar shows seven thumbs of `sample.png`. Visor's card is cream-bordered. The plate reads `VISOR` and a column×row count. Default MARK is CELLS: theater is a visor-palette mosaic, not the raw rainbow of Blocks. Switch to CHARS (`click mark.chars`) to assert block glyphs instead.
 - **Apply Blocks.** Click the Blocks card. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click look.blocks` then `screenshot looks-blocks`. The Blocks card is cream-bordered, the plate reads `BLOCKS`, and the theater uses the still's own colours (rainbow bands on `sample.png`). The two screenshots must differ.
 - **Apply CRT.** Click the CRT card. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click look.crt` then `screenshot looks-crt`. The plate reads `CRT`. Theater glyphs are amber punctuation, not blocks. Screenshot differs from Visor and Blocks.
 - **Apply ANSI.** Click the ANSI card. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click look.ansi` then `screenshot looks-ansi`. The plate reads `ANSI`. Theater glyphs are letters/numbers in the still's colour. Screenshot differs from CRT.
-- **Return to Visor.** Click Visor. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click look.visor` then `screenshot looks-visor-again`. Plate reads `VISOR` and the theater matches the first Visor look, not ANSI.
-- **Proof.** Keep all five screenshots under the evidence directory with this feature id. OCR may show `VISOR` / `BLOCKS` / `CRT` / `ANSI`; pixel difference between looks is required even if OCR misses the plate.
-- **Extra evidence (not a substitute).** `verify-ascii cargo-tests` — `visor_and_crt_use_named_palettes` passes. That does not replace the click journey.
+- **Apply Dither.** Click Dither. Run `click look.dither` then `screenshot looks-dither`. Plate reads `DITHER`. Theater is a stipple of occupied and empty cells, not a solid mosaic. Screenshot differs from Blocks.
+- **Apply Hatch.** Click Hatch. Run `click look.hatch` then `screenshot looks-hatch`. Plate reads `HATCH`. Theater is diagonal occupancy, sage, not Bayer dots. Screenshot differs from Dither.
+- **Apply Scan.** Click Scan. Run `click look.scan` then `screenshot looks-scan`. Plate reads `SCAN`. Theater is teal interlaced rows. Screenshot differs from Hatch.
+- **Return to Visor.** Click Visor. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click look.visor` then `screenshot looks-visor-again`. Plate reads `VISOR` and the theater matches the first Visor look, not Scan.
+- **Proof.** Keep the screenshots under the evidence directory with this feature id. OCR may show look names; pixel difference between looks is required even if OCR misses the plate.
+- **Extra evidence (not a substitute).** `verify-ascii cargo-tests` — `visor_and_crt_use_named_palettes`, `dither_is_binary_occupancy`, `hatch_is_diagonal_occupancy`, and `scan_blanks_odd_rows` pass. That does not replace the click journey.
 
 ## Gotchas
 
@@ -39,3 +45,4 @@ Preconditions:
 - Click coordinates assume the helper floated the window to 1100×820. A tiled foreign window will miss. Doctor + `window` first.
 - Do not click a look on the user's already-open Cosmic Archive window.
 - ANSI after CRT must restore chroma (`saturation` 1.00) and paint the still's colour. Grey ANSI after CRT is a product regression (`Look::Ansi.apply` used to leave CRT's zeroed saturation). `cargo test ansi_after_crt_restores_chroma` covers the leak.
+- Wire and Glitch were probed and skipped: Wire filled photos instead of drawing edges; Glitch read as a broken Visor.

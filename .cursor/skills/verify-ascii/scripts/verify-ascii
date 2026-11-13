@@ -39,16 +39,24 @@ HANDLES = {
     "look.blocks": "look_blocks",
     "look.crt": "look_crt",
     "look.ansi": "look_ansi",
+    "look.dither": "look_dither",
+    "look.hatch": "look_hatch",
+    "look.scan": "look_scan",
     "mark.cells": "mark_cells",
     "mark.chars": "mark_chars",
     "density.32": "density_32",
     "density.80": "density_80",
     "density.132": "density_132",
+    "density.320": "density_320",
+    "density.400": "density_400",
     "density": "density",
     "colour.source": "colour_source",
     "colour.visor": "colour_visor",
     "colour.amber": "colour_amber",
     "colour.cream": "colour_cream",
+    "colour.teal": "colour_teal",
+    "colour.coral": "colour_coral",
+    "colour.sage": "colour_sage",
     "colour.duo": "colour_duo",
     "colour.ink": "colour_ink",
     "colour.paper": "colour_paper",
@@ -188,38 +196,50 @@ def handle_point(handle: str, geom: dict) -> tuple[float, float]:
     full_x = sb + MARGIN + CONTENT_W / 2.0
 
     def density_x(cols: float) -> float:
-        t = (cols - 16.0) / (200.0 - 16.0)
+        t = (cols - 16.0) / (400.0 - 16.0)
         return sb + MARGIN + CONTENT_W * t
 
-    density_y = 454.0
-    colour_y0 = 557.0
-    colour_y1 = 589.0
-    colour_duo_y = 651.0
-    colour_ink_y = 691.0
-    invert_y = 709.0
-    knob_y = 750.0
-    out_y = 864.0
-    out_fmt_y = 896.0
-    copy_y = 936.0
+    # 3-col looks (70px cards) + 3-col colour. Recalibrated after catalog grew.
+    look_y0 = 198.0
+    look_y1 = 274.0
+    look_y2 = 350.0
+    density_y = 518.0
+    colour_y0 = 609.0
+    colour_y1 = 641.0
+    colour_y2 = 673.0
+    colour_ink_y = 733.0
+    invert_y = 793.0
+    knob_y = 834.0
+    out_y = 948.0
+    out_fmt_y = 980.0
+    copy_y = 1020.0
     key = HANDLES[handle]
     local = {
         "open_still": (full_x, 112.0),
         "theater": ((w - SIDEBAR_W) / 2.0, h / 2.0),
-        "look_visor": (left_x, 206.0),
-        "look_blocks": (right_x, 206.0),
-        "look_crt": (left_x, 298.0),
-        "look_ansi": (right_x, 298.0),
-        "mark_cells": (left_x, 370.0),
-        "mark_chars": (right_x, 370.0),
+        "look_visor": (chip_xs[0], look_y0),
+        "look_blocks": (chip_xs[1], look_y0),
+        "look_crt": (chip_xs[2], look_y0),
+        "look_ansi": (chip_xs[0], look_y1),
+        "look_dither": (chip_xs[1], look_y1),
+        "look_hatch": (chip_xs[2], look_y1),
+        "look_scan": (full_x, look_y2),
+        "mark_cells": (left_x, 422.0),
+        "mark_chars": (right_x, 422.0),
         "density_32": (density_x(32), density_y),
         "density_80": (density_x(80), density_y),
         "density_132": (density_x(132), density_y),
+        "density_320": (density_x(320), density_y),
+        "density_400": (density_x(400), density_y),
         "density": (sb + MARGIN + CONTENT_W * 0.80, density_y),
-        "colour_source": (left_x, colour_y0),
-        "colour_visor": (right_x, colour_y0),
-        "colour_amber": (left_x, colour_y1),
-        "colour_cream": (right_x, colour_y1),
-        "colour_duo": (full_x, colour_duo_y),
+        "colour_source": (chip_xs[0], colour_y0),
+        "colour_visor": (chip_xs[1], colour_y0),
+        "colour_amber": (chip_xs[2], colour_y0),
+        "colour_cream": (chip_xs[0], colour_y1),
+        "colour_teal": (chip_xs[1], colour_y1),
+        "colour_coral": (chip_xs[2], colour_y1),
+        "colour_sage": (left_x, colour_y2),
+        "colour_duo": (right_x, colour_y2),
         "colour_ink": (left_x, colour_ink_y),
         "colour_paper": (right_x, colour_ink_y),
         "invert": (full_x, invert_y),

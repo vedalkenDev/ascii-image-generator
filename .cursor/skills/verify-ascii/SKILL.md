@@ -81,11 +81,11 @@ Handles (sidebar, top to bottom):
 | --- | --- |
 | `open.still` | `CHOOSE STILL` / `CHANGE STILL` (native rfd; web clicks `#still-input`) |
 | `theater` | central panel (empty-state click also opens the picker) |
-| `look.visor` `look.blocks` `look.crt` `look.ansi` | look cards |
+| `look.visor` `look.blocks` `look.crt` `look.ansi` `look.dither` `look.hatch` `look.scan` | look cards |
 | `mark.cells` `mark.chars` | mosaic cells vs character glyphs |
-| `density.32` `density.80` `density.132` | positions along the `cols` slider |
+| `density.32` `density.80` `density.132` `density.320` `density.400` | positions along the `cols` slider |
 | `density` | 80% along the `cols` bar |
-| `colour.source` `colour.visor` `colour.amber` `colour.cream` `colour.duo` | colour chips |
+| `colour.source` `colour.visor` `colour.amber` `colour.cream` `colour.teal` `colour.coral` `colour.sage` `colour.duo` | colour chips |
 | `colour.ink` `colour.paper` | DUO ink/paper RGB pickers |
 | `invert` | `INVERT` / `INVERT ON` |
 | `knob` | analog bar (weight / glow / chroma) |

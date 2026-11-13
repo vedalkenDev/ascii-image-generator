@@ -1,6 +1,17 @@
 use image::RgbaImage;
 
 const CHAR_ASPECT: f32 = 0.5;
+const VISOR_RAMP: [[u8; 3]; 6] = [
+    [0x59, 0x2a, 0xa4],
+    [0x42, 0x77, 0xa2],
+    [0x3f, 0xb6, 0xaf],
+    [0x93, 0x9e, 0x7a],
+    [0xc1, 0x8d, 0x5d],
+    [0xd9, 0x63, 0x50],
+];
+const CREAM_RGB: [u8; 3] = [0xf4, 0xf3, 0xe8];
+const AMBER_RGB: [u8; 3] = [0xc1, 0x8d, 0x5d];
+const AMBER_LO: [u8; 3] = [0x18, 0x0e, 0x06];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Charset {
@@ -10,14 +21,6 @@ pub enum Charset {
 }
 
 impl Charset {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Alphanumeric => "Letters / numbers",
-            Self::Blocks => "Blocks ░▒▓█",
-            Self::Punctuation => "Punctuation",
-        }
-    }
-
     pub fn ramp(self) -> &'static [char] {
         match self {
             Self::Alphanumeric => &[
@@ -33,9 +36,67 @@ impl Charset {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Overlay,
-    Ascii,
+pub enum ColorKind {
+    Source,
+    Visor,
+    Amber,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    Visor,
+    Blocks,
+    Crt,
+    Ansi,
+}
+
+impl Look {
+    pub const ALL: [Look; 4] = [Look::Visor, Look::Blocks, Look::Crt, Look::Ansi];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Visor => "VISOR",
+            Self::Blocks => "BLOCKS",
+            Self::Crt => "CRT",
+            Self::Ansi => "ANSI",
+        }
+    }
+
+    pub fn knob(self) -> (&'static str, std::ops::RangeInclusive<f32>) {
+        match self {
+            Self::Visor | Self::Blocks => ("weight", 0.4..=2.4),
+            Self::Crt => ("glow", -0.5..=0.5),
+            Self::Ansi => ("chroma", 0.0..=2.0),
+        }
+    }
+
+    pub fn apply(self, s: &mut Settings) {
+        s.charset = match self {
+            Self::Visor | Self::Blocks => Charset::Blocks,
+            Self::Crt => Charset::Punctuation,
+            Self::Ansi => Charset::Alphanumeric,
+        };
+        s.color_kind = match self {
+            Self::Visor => ColorKind::Visor,
+            Self::Crt => ColorKind::Amber,
+            Self::Blocks | Self::Ansi => ColorKind::Source,
+        };
+        s.color = !matches!(self, Self::Crt);
+        match self {
+            Self::Visor | Self::Blocks => {
+                s.saturation = 1.0;
+                s.brightness = 0.0;
+            }
+            Self::Crt => {
+                s.contrast = 1.0;
+                s.saturation = 0.0;
+            }
+            Self::Ansi => {
+                s.contrast = 1.0;
+                s.brightness = 0.0;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -47,18 +108,20 @@ pub struct Settings {
     pub brightness: f32,
     pub invert: bool,
     pub color: bool,
+    pub color_kind: ColorKind,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            cols: 100,
+            cols: 80,
             charset: Charset::Blocks,
             contrast: 1.0,
             saturation: 1.0,
             brightness: 0.0,
             invert: false,
             color: true,
+            color_kind: ColorKind::Source,
         }
     }
 }
@@ -87,12 +150,7 @@ pub fn convert(img: &RgbaImage, s: &Settings) -> (u32, u32, Vec<Cell>) {
                 yv = 1.0 - yv;
             }
             let ch = ramp_char(ramp, yv);
-            let color = if s.color {
-                to_u8(rgb)
-            } else {
-                let g = (yv * 255.0).round() as u8;
-                [g, g, g]
-            };
+            let color = cell_color(s, rgb, yv);
             out.push(Cell { ch, color });
         }
     }
@@ -157,6 +215,47 @@ fn to_u8(rgb: [f32; 3]) -> [u8; 3] {
     rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
+fn cell_color(s: &Settings, rgb: [f32; 3], yv: f32) -> [u8; 3] {
+    match s.color_kind {
+        ColorKind::Visor => visor_rgb(yv),
+        ColorKind::Amber => amber_rgb(yv),
+        ColorKind::Source if s.color => to_u8(rgb),
+        ColorKind::Source => {
+            let g = (yv * 255.0).round() as u8;
+            [g, g, g]
+        }
+    }
+}
+
+fn visor_rgb(y: f32) -> [u8; 3] {
+    let n = VISOR_RAMP.len();
+    let t = y.clamp(0.0, 1.0) * (n as f32 - 1.0);
+    let i = (t.floor() as usize).min(n - 1);
+    let f = t - i as f32;
+    let a = VISOR_RAMP[i];
+    let b = VISOR_RAMP[(i + 1).min(n - 1)];
+    let mixed = lerp_u8(a, b, f);
+    lerp_u8(mixed, CREAM_RGB, y.clamp(0.0, 1.0) * 0.22)
+}
+
+fn amber_rgb(y: f32) -> [u8; 3] {
+    let y = y.clamp(0.0, 1.0);
+    if y > 0.85 {
+        lerp_u8(AMBER_RGB, CREAM_RGB, (y - 0.85) / 0.15)
+    } else {
+        lerp_u8(AMBER_LO, AMBER_RGB, y / 0.85)
+    }
+}
+
+fn lerp_u8(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t).round() as u8,
+        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t).round() as u8,
+        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t).round() as u8,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +278,34 @@ mod tests {
         assert_eq!(rows, 5);
         assert_eq!(cells.len(), 100);
         assert!(cells.iter().all(|c| c.ch == '█'));
+    }
+
+    #[test]
+    fn convert_invert_maps_white_to_space() {
+        let img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        s.charset = Charset::Blocks;
+        s.invert = true;
+        s.color = false;
+        let (_, _, cells) = convert(&img, &s);
+        assert!(cells.iter().all(|c| c.ch == ' '));
+    }
+
+    #[test]
+    fn visor_and_crt_use_named_palettes() {
+        let img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 255, 255, 255]));
+        let mut visor = Settings::default();
+        visor.cols = 8;
+        Look::Visor.apply(&mut visor);
+        let (_, _, cells) = convert(&img, &visor);
+        assert!(cells.iter().all(|c| c.ch == '█'));
+        assert!(cells.iter().any(|c| c.color != [255, 255, 255]));
+
+        let mut crt = Settings::default();
+        crt.cols = 8;
+        Look::Crt.apply(&mut crt);
+        let (_, _, cells) = convert(&img, &crt);
+        assert!(cells.iter().all(|c| c.color[0] >= c.color[2]));
     }
 }

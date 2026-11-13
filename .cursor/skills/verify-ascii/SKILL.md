@@ -112,7 +112,7 @@ Proof standards:
 - Capture the action and the resulting state (before + after screenshots). OCR sidecar is extra, not enough alone.
 - Side effects: export files must be non-empty and parse as that format. `COPY TXT` must change `wl-paste`. The 2048px cap must leave a process that still paints.
 - Unit tests (`verify-ascii cargo-tests`) and `verify-ascii encode` (the same `io::encode` the UI calls after the save dialog) are extra evidence. They do not replace a GUI journey the map lists.
-- Mocks: none. SVG rasterize and oversized decode may use `magick` because production does.
+- Mocks: none. SVG import is `resvg` in-process. Magick is not production; it may only mint test fixtures if present.
 
 Seed fixture: repo `sample.png` (160×100 PNG). Scratch stills for format/cap journeys go under `$ASCII_VERIFY_DIR`, never over user photos.
 

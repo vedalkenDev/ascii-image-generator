@@ -3,12 +3,17 @@
 mod ascii;
 mod io;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 use ascii::{Cell, Look, Settings};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, Galley,
     Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
@@ -35,6 +40,7 @@ enum Job {
     Saved,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -48,6 +54,30 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    console_error_panic_hook::set_once();
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window()
+            .expect("window")
+            .document()
+            .expect("document");
+        let canvas = document
+            .get_element_by_id("the_canvas_id")
+            .expect("the_canvas_id")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("canvas");
+        eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(|cc| Ok(Box::new(App::new(cc)))),
+            )
+            .await
+            .expect("web start");
+    });
 }
 
 #[derive(Clone)]
@@ -86,6 +116,7 @@ impl App {
         let (jobs_tx, jobs_rx) = mpsc::channel();
         let mut settings = Settings::default();
         Look::Visor.apply(&mut settings);
+        #[allow(unused_mut)]
         let mut app = Self {
             settings,
             look: Look::Visor,
@@ -106,6 +137,7 @@ impl App {
             thumbs: None,
             notice: None,
         };
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = std::env::args().nth(1) {
             app.busy = Some("Decoding…");
             spawn_load_path(app.jobs_tx.clone(), PathBuf::from(path));
@@ -196,10 +228,12 @@ impl App {
         if self.busy.is_some() {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         let mut path: Option<PathBuf> = None;
         let mut bytes: Option<(String, Vec<u8>)> = None;
         ctx.input(|i| {
             for f in &i.raw.dropped_files {
+                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(p) = &f.path {
                     path = Some(p.clone());
                     break;
@@ -215,11 +249,15 @@ impl App {
                 }
             }
         });
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(p) = path {
             self.busy = Some("Decoding…");
             spawn_load_path(self.jobs_tx.clone(), p);
-        } else if let Some((name, b)) = bytes {
+            return;
+        }
+        if let Some((name, b)) = bytes {
             self.busy = Some("Decoding…");
+            ctx.request_repaint();
             spawn_load_bytes(self.jobs_tx.clone(), name, b);
         }
     }
@@ -272,6 +310,8 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_jobs(ctx);
         self.poll_drops(ctx);
+        // wasm drop-decode is sync, so a second drain picks up Loaded this frame.
+        self.poll_jobs(ctx);
         if self.dirty {
             self.rebuild();
         }
@@ -456,6 +496,18 @@ impl eframe::App for App {
     }
 }
 
+fn finish_bytes(tx: &Sender<Job>, name: String, bytes: &[u8]) {
+    match io::load_bytes(bytes) {
+        Ok(img) => {
+            let _ = tx.send(Job::Loaded { name, img });
+        }
+        Err(e) => {
+            let _ = tx.send(Job::Failed(e));
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_pick(tx: Sender<Job>) {
     thread::spawn(move || {
         let picked = rfd::FileDialog::new()
@@ -480,6 +532,24 @@ fn spawn_pick(tx: Sender<Job>) {
     });
 }
 
+#[cfg(target_arch = "wasm32")]
+fn spawn_pick(tx: Sender<Job>) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let Some(file) = rfd::AsyncFileDialog::new()
+            .add_filter("Image", OPEN_FILTERS)
+            .pick_file()
+            .await
+        else {
+            let _ = tx.send(Job::Idle);
+            return;
+        };
+        let name = file.file_name();
+        let bytes = file.read().await;
+        finish_bytes(&tx, name, &bytes);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_load_path(tx: Sender<Job>, path: PathBuf) {
     thread::spawn(move || match io::load_path(&path) {
         Ok(img) => {
@@ -495,14 +565,10 @@ fn spawn_load_path(tx: Sender<Job>, path: PathBuf) {
 }
 
 fn spawn_load_bytes(tx: Sender<Job>, name: String, bytes: Vec<u8>) {
-    thread::spawn(move || match io::load_bytes(&bytes) {
-        Ok(img) => {
-            let _ = tx.send(Job::Loaded { name, img });
-        }
-        Err(e) => {
-            let _ = tx.send(Job::Failed(e));
-        }
-    });
+    #[cfg(not(target_arch = "wasm32"))]
+    thread::spawn(move || finish_bytes(&tx, name, &bytes));
+    #[cfg(target_arch = "wasm32")]
+    finish_bytes(&tx, name, &bytes);
 }
 
 fn spawn_save(
@@ -513,8 +579,9 @@ fn spawn_save(
     rows: u32,
     grid: Vec<Cell>,
 ) {
+    let name = format!("{stem}.{}", kind.ext());
+    #[cfg(not(target_arch = "wasm32"))]
     thread::spawn(move || {
-        let name = format!("{stem}.{}", kind.ext());
         let Some(path) = rfd::FileDialog::new()
             .add_filter(kind.label(), &[kind.ext()])
             .set_file_name(&name)
@@ -527,6 +594,30 @@ fn spawn_save(
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(&path, bytes) {
                     let _ = tx.send(Job::Failed(format!("Could not write file: {e}")));
+                } else {
+                    let _ = tx.send(Job::Saved);
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Job::Failed(e));
+            }
+        }
+    });
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(async move {
+        let Some(file) = rfd::AsyncFileDialog::new()
+            .add_filter(kind.label(), &[kind.ext()])
+            .set_file_name(&name)
+            .save_file()
+            .await
+        else {
+            let _ = tx.send(Job::Idle);
+            return;
+        };
+        match io::encode(kind, cols, rows, &grid) {
+            Ok(bytes) => {
+                if file.write(&bytes).await.is_err() {
+                    let _ = tx.send(Job::Failed("Could not write file.".into()));
                 } else {
                     let _ = tx.send(Job::Saved);
                 }
@@ -943,6 +1034,7 @@ fn fit_rect(avail: Rect, img_w: f32, img_h: f32) -> Rect {
     Rect::from_center_size(avail.center(), size)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn file_stem(path: &Path) -> String {
     path.file_name()
         .and_then(|s| s.to_str())
@@ -998,6 +1090,7 @@ fn apply_theme(ctx: &egui::Context) {
 
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
+    #[cfg(not(target_arch = "wasm32"))]
     if let Ok(bytes) = std::fs::read("/usr/share/fonts/noto/NotoSans-Regular.ttf") {
         fonts.font_data.insert(
             "ui".into(),
@@ -1009,29 +1102,36 @@ fn install_fonts(ctx: &egui::Context) {
             .or_default()
             .insert(0, "ui".into());
     }
-    const MONO: &[&str] = &[
-        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
-    ];
-    for path in MONO {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts.font_data.insert(
-                "mono_blocks".into(),
-                std::sync::Arc::new(FontData::from_owned(bytes)),
-            );
-            fonts
-                .families
-                .entry(FontFamily::Monospace)
-                .or_default()
-                .insert(0, "mono_blocks".into());
-            fonts
-                .families
-                .entry(FontFamily::Proportional)
-                .or_default()
-                .push("mono_blocks".into());
-            break;
+    let mono = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            Some(include_bytes!("../assets/NotoSansMono-Regular.ttf").to_vec())
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            const MONO: &[&str] = &[
+                "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+                "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+                "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+            ];
+            MONO.iter().find_map(|path| std::fs::read(path).ok())
+        }
+    };
+    if let Some(bytes) = mono {
+        fonts.font_data.insert(
+            "mono_blocks".into(),
+            std::sync::Arc::new(FontData::from_owned(bytes)),
+        );
+        fonts
+            .families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .insert(0, "mono_blocks".into());
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .push("mono_blocks".into());
     }
     ctx.set_fonts(fonts);
 }

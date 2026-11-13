@@ -5,7 +5,7 @@ This directory is the maintained source for verifying the user-facing behavior o
 ## Baseline preconditions
 
 - Repo root of `ascii-image-generator` with `sample.png` present.
-- `~/.cargo/bin` on `PATH`. `hyprctl`, `grim`, and `magick` available.
+- `~/.cargo/bin` on `PATH`. `hyprctl` and `grim` available. Magick is optional fixture minting, not a product dependency.
 - Launch with `.cursor/skills/verify-ascii/scripts/verify-ascii launch` (loads `sample.png`) unless a feature says `--empty` or `--still`.
 - Run `verify-ascii doctor` and require `"ok": true` for **our** PID. Title must be `Cosmic Archive — ASCII`.
 - Never drive an instance this run did not start. A window already on workspace 5 is foreign.

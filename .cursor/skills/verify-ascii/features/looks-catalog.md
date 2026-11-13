@@ -24,7 +24,7 @@ Preconditions:
 - `verify-ascii doctor` is ok.
 - Theater is not `NO STILL LOADED`.
 
-- **Thumbs present.** Capture the default Visor state. Run `.cursor/skills/verify-ascii/scripts/verify-ascii screenshot looks-visor`. The sidebar shows four thumbs of `sample.png`. Visor's card is cream-bordered. The plate reads `VISOR` and a column×row count. Theater glyphs are visor-palette (violet/blue/teal/sage/amber/coral), not the raw rainbow of Blocks.
+- **Thumbs present.** Capture the default Visor state. Run `.cursor/skills/verify-ascii/scripts/verify-ascii screenshot looks-visor`. The sidebar shows four thumbs of `sample.png`. Visor's card is cream-bordered. The plate reads `VISOR` and a column×row count. Default MARK is CELLS: theater is a visor-palette mosaic, not the raw rainbow of Blocks. Switch to CHARS (`click mark.chars`) to assert block glyphs instead.
 - **Apply Blocks.** Click the Blocks card. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click look.blocks` then `screenshot looks-blocks`. The Blocks card is cream-bordered, the plate reads `BLOCKS`, and the theater uses the still's own colours (rainbow bands on `sample.png`). The two screenshots must differ.
 - **Apply CRT.** Click the CRT card. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click look.crt` then `screenshot looks-crt`. The plate reads `CRT`. Theater glyphs are amber punctuation, not blocks. Screenshot differs from Visor and Blocks.
 - **Apply ANSI.** Click the ANSI card. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click look.ansi` then `screenshot looks-ansi`. The plate reads `ANSI`. Theater glyphs are letters/numbers in the still's colour. Screenshot differs from CRT.

@@ -43,6 +43,7 @@ Keep implementation details out of the map. Name only user paths, stable handles
 
 - [Load a still](./load-still.md) covers Open still, drag-drop, CLI path, formats, and the 2048px long-side cap.
 - [Looks catalog](./looks-catalog.md) covers Visor, Blocks, CRT, ANSI live thumbs and applying a look by clicking its card.
+- [Cells and characters](./mark-cells-chars.md) covers `:: MARK` CELLS (mosaic) vs CHARS (glyphs).
 - [Density, invert, knob](./density-invert-knob.md) covers 32 / 80 / 132, invert, and the one analog knob the current look uses.
 - [Export](./export.md) covers TXT, SVG, ANSI, and COPY TXT. PNG/HTML are not in the sidebar.
 - [Empty theater](./empty-theater.md) covers `NO STILL LOADED` when nothing is loaded.

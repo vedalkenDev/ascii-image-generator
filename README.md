@@ -40,7 +40,7 @@ The sidebar is a catalog of the loaded still, not a settings form.
 | **CRT** | Amber phosphor punctuation, terminal-style |
 | **ANSI** | Letter and number glyphs in the still’s colour |
 
-Each look keeps three controls: density **32 / 80 / 132**, invert, and one knob that look actually uses (weight, glow, or chroma).
+Each look keeps **CELLS** (square mosaic) or **CHARS** (glyphs), density **32 / 80 / 132**, invert, and one knob that look actually uses (weight, glow, or chroma). CELLS is the default.
 
 ## Run on Linux
 

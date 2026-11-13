@@ -79,9 +79,10 @@ Handles (sidebar, top to bottom):
 
 | Handle | User control |
 | --- | --- |
-| `open.still` | `OPEN STILL` (opens rfd; see Gotchas) |
-| `theater` | central panel (empty-state click also opens rfd) |
+| `open.still` | `CHOOSE STILL` / `CHANGE STILL` (native rfd; web clicks `#still-input`) |
+| `theater` | central panel (empty-state click also opens the picker) |
 | `look.visor` `look.blocks` `look.crt` `look.ansi` | look cards |
+| `mark.cells` `mark.chars` | mosaic cells vs character glyphs |
 | `density.32` `density.80` `density.132` | density chips |
 | `invert` | `INVERT` / `INVERT ON` |
 | `knob` | analog bar (weight / glow / chroma) |

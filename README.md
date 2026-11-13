@@ -74,12 +74,14 @@ File size is not the limit. After decode, the long side is capped at **2048px** 
 
 From the sidebar **OUT**:
 
-- **TXT** — plain glyph grid
-- **SVG** — vector glyphs (not a raster of the still)
-- **ANSI** — coloured terminal art
-- **COPY TXT** — the grid on the clipboard
+- **VECTOR** — SVG, TXT, ANSI
+- **RASTER** — PNG, JPEG, WEBP of the theater mosaic (not the original still)
+- **COPY TEXT** — the glyph grid on the clipboard
+- **COPY IMAGE** — the mosaic on the clipboard (PNG)
 
-On the web build, TXT / SVG / ANSI go straight to the browser **Downloads** folder (named after the still). There is no save dialog. The sidebar reads `saved still.txt` the same way **COPY TXT** reads `copied`. Desktop still asks where to put the file.
+On the web build, downloads go straight to the browser **Downloads** folder. Sage copy reads `saved still.svg` the same way **COPY TEXT** reads `copied text`. Desktop still asks where to put a download.
+
+**COLOUR** includes **DUO**: the still is read as luma, then mapped from **INK** to **PAPER** (click to cycle visor swatches). Looks still sit on top.
 
 **SVG** is built for Figma: CELLS as merged `<rect>` runs, CHARS as one `<text>` row of `<tspan>`s, fills snapped to 4-bit colour so neighbours collapse. Export reconverts at **80 columns** even if the theater slider is higher, so a phone still does not dump 70k text nodes.
 

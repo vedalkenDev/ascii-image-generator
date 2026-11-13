@@ -49,12 +49,21 @@ HANDLES = {
     "colour.visor": "colour_visor",
     "colour.amber": "colour_amber",
     "colour.cream": "colour_cream",
+    "colour.duo": "colour_duo",
+    "colour.ink": "colour_ink",
+    "colour.paper": "colour_paper",
     "invert": "invert",
     "knob": "knob",
+    "out.vector": "out_vector",
+    "out.raster": "out_raster",
     "out.txt": "out_txt",
     "out.svg": "out_svg",
     "out.ansi": "out_ansi",
+    "out.png": "out_png",
+    "out.jpeg": "out_jpeg",
+    "out.webp": "out_webp",
     "copy.txt": "copy_txt",
+    "copy.image": "copy_image",
 }
 
 SCRIPT = Path(__file__).resolve()
@@ -185,10 +194,13 @@ def handle_point(handle: str, geom: dict) -> tuple[float, float]:
     density_y = 454.0
     colour_y0 = 508.0
     colour_y1 = 540.0
-    invert_y = 592.0
-    knob_y = 633.0
-    out_y = 747.0
-    copy_y = 787.0
+    colour_duo_y = 572.0
+    colour_ink_y = 604.0
+    invert_y = 624.0
+    knob_y = 665.0
+    out_y = 779.0
+    out_fmt_y = 811.0
+    copy_y = 851.0
     key = HANDLES[handle]
     local = {
         "open_still": (full_x, 112.0),
@@ -207,12 +219,21 @@ def handle_point(handle: str, geom: dict) -> tuple[float, float]:
         "colour_visor": (right_x, colour_y0),
         "colour_amber": (left_x, colour_y1),
         "colour_cream": (right_x, colour_y1),
+        "colour_duo": (full_x, colour_duo_y),
+        "colour_ink": (left_x, colour_ink_y),
+        "colour_paper": (right_x, colour_ink_y),
         "invert": (full_x, invert_y),
         "knob": (sb + MARGIN + CONTENT_W * 0.80, knob_y),
-        "out_txt": (chip_xs[0], out_y),
-        "out_svg": (chip_xs[1], out_y),
-        "out_ansi": (chip_xs[2], out_y),
-        "copy_txt": (full_x, copy_y),
+        "out_vector": (left_x, out_y),
+        "out_raster": (right_x, out_y),
+        "out_svg": (chip_xs[0], out_fmt_y),
+        "out_txt": (chip_xs[1], out_fmt_y),
+        "out_ansi": (chip_xs[2], out_fmt_y),
+        "out_png": (chip_xs[0], out_fmt_y),
+        "out_jpeg": (chip_xs[1], out_fmt_y),
+        "out_webp": (chip_xs[2], out_fmt_y),
+        "copy_txt": (left_x, copy_y),
+        "copy_image": (right_x, copy_y),
     }[key]
     return ax + local[0], ay + local[1]
 

@@ -188,8 +188,9 @@ fn apply_jpeg_orientation(bytes: &[u8], img: &mut RgbaImage) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ExportKind {
     Txt,
-    #[allow(dead_code)]
     Png,
+    Jpeg,
+    Webp,
     Svg,
     #[allow(dead_code)]
     Html,
@@ -201,6 +202,8 @@ impl ExportKind {
         match self {
             Self::Txt => "txt",
             Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
             Self::Svg => "svg",
             Self::Html => "html",
             Self::Ansi => "ans",
@@ -211,6 +214,8 @@ impl ExportKind {
         match self {
             Self::Txt => "TXT",
             Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Webp => "WEBP",
             Self::Svg => "SVG",
             Self::Html => "HTML",
             Self::Ansi => "ANSI",
@@ -223,6 +228,8 @@ impl ExportKind {
             Self::Svg => "image/svg+xml;charset=utf-8",
             Self::Html => "text/html;charset=utf-8",
             Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
         }
     }
 }
@@ -398,14 +405,12 @@ pub fn to_ansi(cols: u32, rows: u32, grid: &[Cell]) -> String {
     out
 }
 
-pub fn to_png(cols: u32, rows: u32, grid: &[Cell]) -> Result<Vec<u8>, String> {
-    png_mosaic(cols, rows, grid)
-}
-
-fn png_mosaic(cols: u32, rows: u32, grid: &[Cell]) -> Result<Vec<u8>, String> {
-    const CW: u32 = 8;
-    const CH: u32 = 16;
-    let mut img = RgbaImage::from_pixel(cols * CW, rows * CH, image::Rgba([0x05, 0x05, 0x08, 255]));
+pub fn mosaic_rgba(cols: u32, rows: u32, grid: &[Cell], mark: Mark) -> RgbaImage {
+    let (cw, ch) = match mark {
+        Mark::Cells => (8u32, 8u32),
+        Mark::Chars => (8u32, 16u32),
+    };
+    let mut img = RgbaImage::from_pixel(cols * cw, rows * ch, image::Rgba([0x05, 0x05, 0x08, 255]));
     for y in 0..rows {
         for x in 0..cols {
             let cell = grid[(y * cols + x) as usize];
@@ -413,16 +418,33 @@ fn png_mosaic(cols: u32, rows: u32, grid: &[Cell]) -> Result<Vec<u8>, String> {
                 continue;
             }
             let px = image::Rgba([cell.color[0], cell.color[1], cell.color[2], 255]);
-            for dy in 2..CH - 2 {
-                for dx in 1..CW - 1 {
-                    img.put_pixel(x * CW + dx, y * CH + dy, px);
+            let x0 = x * cw;
+            let y0 = y * ch;
+            for dy in 0..ch {
+                for dx in 0..cw {
+                    img.put_pixel(x0 + dx, y0 + dy, px);
                 }
             }
         }
     }
+    img
+}
+
+pub fn to_png(cols: u32, rows: u32, grid: &[Cell], mark: Mark) -> Result<Vec<u8>, String> {
+    encode_mosaic(cols, rows, grid, mark, ImageFormat::Png)
+}
+
+fn encode_mosaic(
+    cols: u32,
+    rows: u32,
+    grid: &[Cell],
+    mark: Mark,
+    format: ImageFormat,
+) -> Result<Vec<u8>, String> {
+    let img = mosaic_rgba(cols, rows, grid, mark);
     let mut buf = Cursor::new(Vec::new());
     DynamicImage::ImageRgba8(img)
-        .write_to(&mut buf, ImageFormat::Png)
+        .write_to(&mut buf, format)
         .map_err(|e| e.to_string())?;
     Ok(buf.into_inner())
 }
@@ -439,7 +461,9 @@ pub fn encode(
         ExportKind::Svg => Ok(to_svg(cols, rows, grid, mark).into_bytes()),
         ExportKind::Html => Ok(to_html(cols, rows, grid).into_bytes()),
         ExportKind::Ansi => Ok(to_ansi(cols, rows, grid).into_bytes()),
-        ExportKind::Png => to_png(cols, rows, grid),
+        ExportKind::Png => encode_mosaic(cols, rows, grid, mark, ImageFormat::Png),
+        ExportKind::Jpeg => encode_mosaic(cols, rows, grid, mark, ImageFormat::Jpeg),
+        ExportKind::Webp => encode_mosaic(cols, rows, grid, mark, ImageFormat::WebP),
     }
 }
 
@@ -585,11 +609,18 @@ mod tests {
         let html = to_html(cols, rows, &grid);
         assert!(html.contains("<pre>"));
         assert!(html.contains("█"));
-        let png = to_png(cols, rows, &grid).expect("png");
+        let png = to_png(cols, rows, &grid, Mark::Cells).expect("png");
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
         let img = image::load_from_memory(&png).expect("decode png export");
         assert!(img.width() >= cols);
         assert!(img.height() >= rows);
+        let mosaic = mosaic_rgba(cols, rows, &grid, Mark::Cells);
+        assert_eq!(mosaic.width(), img.width());
+        assert_eq!(mosaic.height(), img.height());
+        let jpg = encode(ExportKind::Jpeg, cols, rows, &grid, Mark::Cells).expect("jpeg");
+        assert_eq!(&jpg[..2], &[0xff, 0xd8]);
+        let webp = encode(ExportKind::Webp, cols, rows, &grid, Mark::Cells).expect("webp");
+        assert_eq!(&webp[..4], b"RIFF");
     }
 
     #[test]
@@ -607,6 +638,8 @@ mod tests {
         for kind in [
             ExportKind::Txt,
             ExportKind::Png,
+            ExportKind::Jpeg,
+            ExportKind::Webp,
             ExportKind::Svg,
             ExportKind::Html,
             ExportKind::Ansi,
@@ -684,8 +717,14 @@ mod tests {
         assert_eq!(ExportKind::Txt.ext(), "txt");
         assert_eq!(ExportKind::Svg.ext(), "svg");
         assert_eq!(ExportKind::Ansi.ext(), "ans");
+        assert_eq!(ExportKind::Png.ext(), "png");
+        assert_eq!(ExportKind::Jpeg.ext(), "jpg");
+        assert_eq!(ExportKind::Webp.ext(), "webp");
         assert!(ExportKind::Txt.mime().starts_with("text/plain"));
         assert!(ExportKind::Svg.mime().starts_with("image/svg+xml"));
         assert!(ExportKind::Ansi.mime().starts_with("text/plain"));
+        assert_eq!(ExportKind::Png.mime(), "image/png");
+        assert_eq!(ExportKind::Jpeg.mime(), "image/jpeg");
+        assert_eq!(ExportKind::Webp.mime(), "image/webp");
     }
 }

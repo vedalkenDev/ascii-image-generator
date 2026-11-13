@@ -279,6 +279,7 @@ impl eframe::App for App {
         egui::SidePanel::right("controls")
             .resizable(false)
             .exact_width(320.0)
+            .show_separator_line(false)
             .frame(
                 Frame::new()
                     .fill(GROUND)
@@ -286,25 +287,6 @@ impl eframe::App for App {
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
-                let seam = ui.max_rect();
-                ui.painter().rect_filled(
-                    Rect::from_min_max(seam.min, Pos2::new(seam.max.x, seam.min.y + 3.0)),
-                    0,
-                    TEAL,
-                );
-                ui.painter().rect_filled(
-                    Rect::from_min_max(
-                        Pos2::new(seam.min.x, seam.min.y + 3.0),
-                        Pos2::new(seam.max.x, seam.min.y + 16.0),
-                    ),
-                    0,
-                    TEAL.gamma_multiply(0.10),
-                );
-                ui.painter().vline(
-                    seam.left() + 0.5,
-                    seam.y_range(),
-                    Stroke::new(1.0_f32, CREAM.gamma_multiply(0.28)),
-                );
                 self.ensure_thumbs();
                 let thumbs = self.thumbs.as_ref().map(|(_, cards)| cards.clone());
                 egui::ScrollArea::vertical()

@@ -81,6 +81,8 @@ From the sidebar **OUT**:
 
 On the web build, TXT / SVG / ANSI go straight to the browser **Downloads** folder (named after the still). There is no save dialog. The sidebar reads `saved still.txt` the same way **COPY TXT** reads `copied`. Desktop still asks where to put the file.
 
+**SVG** is built for Figma: CELLS as merged `<rect>` runs, CHARS as one `<text>` row of `<tspan>`s, fills snapped to 4-bit colour so neighbours collapse. Export reconverts at **80 columns** even if the theater slider is higher, so a phone still does not dump 70k text nodes.
+
 ## License
 
 Personal project for Cosmic Archive. All rights reserved unless a license file is added later.

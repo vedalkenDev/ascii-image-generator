@@ -36,6 +36,6 @@ Preconditions:
 
 - Thumbs only exist after a still is loaded. On `--empty`, cards show the look name as text; do not call that a catalog proof.
 - Invert is shared with thumbs. If invert is on, thumbs flip too. Reset invert before comparing looks unless the journey is about invert.
-- Click coordinates assume the helper floated the window to 1100×680. A tiled foreign window will miss. Doctor + `window` first.
+- Click coordinates assume the helper floated the window to 1100×820. A tiled foreign window will miss. Doctor + `window` first.
 - Do not click a look on the user's already-open Cosmic Archive window.
 - ANSI after CRT must restore chroma (`saturation` 1.00) and paint the still's colour. Grey ANSI after CRT is a product regression (`Look::Ansi.apply` used to leave CRT's zeroed saturation). `cargo test ansi_after_crt_restores_chroma` covers the leak.

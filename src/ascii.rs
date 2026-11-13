@@ -10,6 +10,7 @@ const VISOR_RAMP: [[u8; 3]; 6] = [
     [0xd9, 0x63, 0x50],
 ];
 const CREAM_RGB: [u8; 3] = [0xf4, 0xf3, 0xe8];
+const GROUND_RGB: [u8; 3] = [0x05, 0x05, 0x08];
 const AMBER_RGB: [u8; 3] = [0xc1, 0x8d, 0x5d];
 const AMBER_LO: [u8; 3] = [0x18, 0x0e, 0x06];
 
@@ -40,6 +41,25 @@ pub enum ColorKind {
     Source,
     Visor,
     Amber,
+    Cream,
+}
+
+impl ColorKind {
+    pub const ALL: [ColorKind; 4] = [
+        ColorKind::Source,
+        ColorKind::Visor,
+        ColorKind::Amber,
+        ColorKind::Cream,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Source => "SOURCE",
+            Self::Visor => "VISOR",
+            Self::Amber => "AMBER",
+            Self::Cream => "CREAM",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -146,7 +166,7 @@ impl Default for Settings {
             brightness: 0.0,
             invert: false,
             color: true,
-            color_kind: ColorKind::Source,
+            color_kind: ColorKind::Visor,
         }
     }
 }
@@ -244,6 +264,7 @@ fn cell_color(s: &Settings, rgb: [f32; 3], yv: f32) -> [u8; 3] {
     match s.color_kind {
         ColorKind::Visor => visor_rgb(yv),
         ColorKind::Amber => amber_rgb(yv),
+        ColorKind::Cream => lerp_u8(GROUND_RGB, CREAM_RGB, yv.clamp(0.0, 1.0)),
         ColorKind::Source if s.color => to_u8(rgb),
         ColorKind::Source => {
             let g = (yv * 255.0).round() as u8;
@@ -355,6 +376,27 @@ mod tests {
         Look::Crt.apply(&mut s);
         Look::Ansi.apply(&mut s);
         assert!((s.saturation - 1.0).abs() < f32::EPSILON);
+        let (_, _, cells) = convert(&img, &s);
+        assert!(cells.iter().any(|c| c.color[0] > c.color[1] && c.color[0] > c.color[2]));
+    }
+
+    #[test]
+    fn cream_maps_white_to_cream() {
+        let img = RgbaImage::from_pixel(20, 20, image::Rgba([255, 255, 255, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        s.color_kind = ColorKind::Cream;
+        let (_, _, cells) = convert(&img, &s);
+        assert!(cells.iter().all(|c| c.color == CREAM_RGB));
+    }
+
+    #[test]
+    fn source_keeps_still_colour() {
+        let img = RgbaImage::from_pixel(20, 20, image::Rgba([220, 40, 30, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        Look::Visor.apply(&mut s);
+        s.color_kind = ColorKind::Source;
         let (_, _, cells) = convert(&img, &s);
         assert!(cells.iter().any(|c| c.color[0] > c.color[1] && c.color[0] > c.color[2]));
     }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
-use ascii::{Cell, Look, Mark, Settings};
+use ascii::{Cell, ColorKind, Look, Mark, Settings};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 use eframe::egui::{
@@ -39,6 +39,7 @@ enum Job {
     Failed(String),
     Idle,
     Saved,
+    Busy(&'static str),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -159,8 +160,10 @@ impl App {
     }
 
     fn apply_look(&mut self, look: Look) {
+        let colour = self.settings.color_kind;
         self.look = look;
         look.apply(&mut self.settings);
+        self.settings.color_kind = colour;
         self.dirty = true;
     }
 
@@ -219,6 +222,10 @@ impl App {
                 }
                 Job::Idle | Job::Saved => {
                     self.busy = None;
+                }
+                Job::Busy(s) => {
+                    self.busy = Some(s);
+                    self.error = None;
                 }
             }
         }
@@ -419,17 +426,32 @@ impl eframe::App for App {
                         });
 
                         section(ui, "DENSITY");
-                        ui.horizontal(|ui| {
-                            let w = (ui.available_width() - 12.0) / 3.0;
-                            for n in [32_u32, 80, 132] {
-                                if chip(ui, w, &n.to_string(), self.settings.cols == n, reduced)
+                        if archive_dial_u32(ui, "cols", &mut self.settings.cols, 16..=200) {
+                            self.dirty = true;
+                        }
+
+                        section(ui, "COLOUR");
+                        let gap = 6.0;
+                        let chip_w = (ui.available_width() - gap) / 2.0;
+                        for pair in ColorKind::ALL.chunks(2) {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = gap;
+                                for kind in pair {
+                                    if chip(
+                                        ui,
+                                        chip_w,
+                                        kind.name(),
+                                        self.settings.color_kind == *kind,
+                                        reduced,
+                                    )
                                     .clicked()
-                                {
-                                    self.settings.cols = n;
-                                    self.dirty = true;
+                                    {
+                                        self.settings.color_kind = *kind;
+                                        self.dirty = true;
+                                    }
                                 }
-                            }
-                        });
+                            });
+                        }
 
                         section(ui, self.look.name());
                         if chip(
@@ -640,7 +662,8 @@ fn install_web_still_hooks(tx: Sender<Job>, ctx: egui::Context) {
                 let Some(file) = files.get(0) else {
                     return;
                 };
-                let _ = tx_in.send(Job::Idle);
+                let _ = tx_in.send(Job::Busy("Decoding…"));
+                ctx_in.request_repaint();
                 read_web_file(tx_in.clone(), ctx_in.clone(), file);
             }) as Box<dyn FnMut(_)>);
             let _ = input.add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref());
@@ -648,37 +671,321 @@ fn install_web_still_hooks(tx: Sender<Job>, ctx: egui::Context) {
         }
     }
 
+    let capture = {
+        let o = web_sys::AddEventListenerOptions::new();
+        o.set_capture(true);
+        o
+    };
+
+    let on_over = Closure::wrap(Box::new(move |event: web_sys::DragEvent| {
+        event.prevent_default();
+        if let Some(dt) = event.data_transfer() {
+            let _ = dt.set_drop_effect("copy");
+        }
+    }) as Box<dyn FnMut(_)>);
+    let _ = window.add_event_listener_with_callback_and_add_event_listener_options(
+        "dragover",
+        on_over.as_ref().unchecked_ref(),
+        &capture,
+    );
+    on_over.forget();
+
+    let tx_drop = tx.clone();
+    let ctx_drop = ctx.clone();
+    let on_drop = Closure::wrap(Box::new(move |event: web_sys::DragEvent| {
+        event.prevent_default();
+        event.stop_propagation();
+        let Some(dt) = event.data_transfer() else {
+            return;
+        };
+        if let Some(file) = first_drag_file(&dt) {
+            let _ = tx_drop.send(Job::Busy("Decoding…"));
+            ctx_drop.request_repaint();
+            read_web_file(tx_drop.clone(), ctx_drop.clone(), file);
+            return;
+        }
+        if let Some(url) = drag_urls(&dt).into_iter().next() {
+            let _ = tx_drop.send(Job::Busy("Decoding…"));
+            ctx_drop.request_repaint();
+            fetch_web_still(tx_drop.clone(), ctx_drop.clone(), url);
+            return;
+        }
+        let _ = tx_drop.send(Job::Failed(
+            "Could not read that drop. Save the photo and choose it.".into(),
+        ));
+        ctx_drop.request_repaint();
+    }) as Box<dyn FnMut(_)>);
+    let _ = window.add_event_listener_with_callback_and_add_event_listener_options(
+        "drop",
+        on_drop.as_ref().unchecked_ref(),
+        &capture,
+    );
+    on_drop.forget();
+
     let tx_paste = tx;
     let ctx_paste = ctx;
     let on_paste = Closure::wrap(Box::new(move |event: ClipboardEvent| {
         let Some(dt) = event.clipboard_data() else {
             return;
         };
-        let Some(files) = dt.files() else {
+        if let Some(file) = first_drag_file(&dt) {
+            event.prevent_default();
+            let _ = tx_paste.send(Job::Busy("Decoding…"));
+            ctx_paste.request_repaint();
+            read_web_file(tx_paste.clone(), ctx_paste.clone(), file);
             return;
-        };
-        let Some(file) = files.get(0) else {
-            return;
-        };
-        event.prevent_default();
-        let _ = tx_paste.send(Job::Idle);
-        read_web_file(tx_paste.clone(), ctx_paste.clone(), file);
+        }
+        if let Some(url) = drag_urls(&dt).into_iter().next() {
+            event.prevent_default();
+            let _ = tx_paste.send(Job::Busy("Decoding…"));
+            ctx_paste.request_repaint();
+            fetch_web_still(tx_paste.clone(), ctx_paste.clone(), url);
+        }
     }) as Box<dyn FnMut(_)>);
     let _ = window.add_event_listener_with_callback("paste", on_paste.as_ref().unchecked_ref());
     on_paste.forget();
 }
 
+#[cfg(target_arch = "wasm32")]
+fn first_drag_file(dt: &web_sys::DataTransfer) -> Option<web_sys::File> {
+    if let Some(files) = dt.files() {
+        if let Some(file) = files.get(0) {
+            return Some(file);
+        }
+    }
+    let items = dt.items();
+    for i in 0..items.length() {
+        if let Some(item) = items.get(i) {
+            if item.kind() == "file" {
+                if let Ok(Some(file)) = item.get_as_file() {
+                    return Some(file);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn drag_urls(dt: &web_sys::DataTransfer) -> Vec<String> {
+    let mut urls = Vec::new();
+    for kind in ["text/uri-list", "text/x-moz-url", "text/plain", "text/html"] {
+        if let Ok(raw) = dt.get_data(kind) {
+            urls.extend(urls_from_payload(kind, &raw));
+        }
+    }
+    rank_drop_urls(urls)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fetch_web_still(tx: Sender<Job>, ctx: egui::Context, url: String) {
+    wasm_bindgen_futures::spawn_local(async move {
+        match fetch_bytes(&url).await {
+            Ok((name, bytes)) => finish_bytes(&tx, name, &bytes),
+            Err(e) => {
+                let _ = tx.send(Job::Failed(e));
+            }
+        }
+        ctx.request_repaint();
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_bytes(url: &str) -> Result<(String, Vec<u8>), String> {
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("GET");
+    opts.set_mode(web_sys::RequestMode::Cors);
+    opts.set_credentials(web_sys::RequestCredentials::Omit);
+    let promise = window.fetch_with_str_and_init(url, &opts);
+    let resp_val = wasm_bindgen_futures::JsFuture::from(promise).await.map_err(|_| {
+        "That site will not let the archive fetch the photo. Save it, then CHOOSE STILL.".to_string()
+    })?;
+    let resp: web_sys::Response = resp_val.dyn_into().map_err(|_| "bad response".to_string())?;
+    if !resp.ok() {
+        return Err(
+            "That site will not let the archive fetch the photo. Save it, then CHOOSE STILL."
+                .into(),
+        );
+    }
+    let buf = wasm_bindgen_futures::JsFuture::from(
+        resp.array_buffer().map_err(|_| "empty body".to_string())?,
+    )
+    .await
+    .map_err(|_| "empty body".to_string())?;
+    let arr = js_sys::Uint8Array::new(&buf);
+    if arr.length() == 0 {
+        return Err("empty photo".into());
+    }
+    let mut bytes = vec![0u8; arr.length() as usize];
+    arr.copy_to(&mut bytes);
+    if looks_like_html_page(&bytes) {
+        return Err(
+            "That drop was a page, not a photo. Drag the image itself, or save it and choose it."
+                .into(),
+        );
+    }
+    Ok((still_name_from_url(url), bytes))
+}
+
+fn still_name_from_url(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("web-still")
+        .to_string()
+}
+
+fn looks_like_html_page(bytes: &[u8]) -> bool {
+    let n = bytes.len().min(64);
+    let s = String::from_utf8_lossy(&bytes[..n]).to_ascii_lowercase();
+    s.contains("<!doctype html") || s.contains("<html")
+}
+
+fn rank_drop_urls(mut urls: Vec<String>) -> Vec<String> {
+    urls.sort_by_key(|u| std::cmp::Reverse(pinterest_rank(u)));
+    urls.dedup();
+    urls
+}
+
+fn urls_from_payload(kind: &str, raw: &str) -> Vec<String> {
+    if kind == "text/html" {
+        return urls_from_html(raw);
+    }
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let first = line.split('\t').next().unwrap_or(line);
+        if let Some(u) = normalize_drop_url(first) {
+            out.push(u);
+        }
+    }
+    out
+}
+
+fn urls_from_html(raw: &str) -> Vec<String> {
+    let lower = raw.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for value in html_attr_values(&lower, raw, "srcset=") {
+        for part in value.split(',') {
+            let tok = part.trim().split_whitespace().next().unwrap_or("");
+            if let Some(u) = normalize_drop_url(&unescape_html(tok)) {
+                out.push(u);
+            }
+        }
+    }
+    for value in html_attr_values(&lower, raw, "src=") {
+        if let Some(u) = normalize_drop_url(&unescape_html(&value)) {
+            out.push(u);
+        }
+    }
+    out
+}
+
+fn html_attr_values(lower: &str, raw: &str, attr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(rel) = lower.get(pos..).and_then(|s| s.find(attr)) {
+        let abs = pos + rel;
+        if attr == "src=" && abs >= 3 && lower.get(abs - 3..abs) == Some("set") {
+            pos = abs + attr.len();
+            continue;
+        }
+        let start = abs + attr.len();
+        let rest = raw.get(start..).unwrap_or("");
+        let trimmed = rest.trim_start();
+        let skip = rest.len() - trimmed.len();
+        let (value, adv) = if trimmed.starts_with('"') || trimmed.starts_with('\'') {
+            let q = trimmed.as_bytes()[0] as char;
+            match trimmed[1..].find(q) {
+                Some(i) => (trimmed[1..1 + i].to_string(), skip + i + 2),
+                None => break,
+            }
+        } else {
+            let tok = trimmed
+                .split(|c: char| c.is_whitespace() || c == '>')
+                .next()
+                .unwrap_or("");
+            (tok.to_string(), skip + tok.len())
+        };
+        out.push(value);
+        pos = start + adv;
+        if pos <= start {
+            pos = start + 1;
+        }
+    }
+    out
+}
+
+fn unescape_html(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+fn normalize_drop_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let mut u = url.to_string();
+    if u.starts_with("//") {
+        u = format!("https:{u}");
+    }
+    if !(u.starts_with("https://")
+        || u.starts_with("http://")
+        || u.starts_with("data:image/")
+        || u.starts_with("blob:"))
+    {
+        return None;
+    }
+    if u.contains("pinimg.com") {
+        for size in ["/236x/", "/474x/", "/564x/", "/736x/", "/1200x/"] {
+            if u.contains(size) {
+                u = u.replace(size, "/originals/");
+                break;
+            }
+        }
+    }
+    Some(u)
+}
+
+fn pinterest_rank(url: &str) -> u32 {
+    let u = url.to_ascii_lowercase();
+    let mut n = url.len() as u32;
+    if u.contains("pinimg.com") {
+        n += 1000;
+    }
+    if u.contains("/originals/") {
+        n += 500;
+    } else if u.contains("/736x/") {
+        n += 300;
+    }
+    if u.ends_with(".jpg") || u.ends_with(".jpeg") || u.ends_with(".png") || u.ends_with(".webp") {
+        n += 200;
+    }
+    n
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_load_path(tx: Sender<Job>, path: PathBuf) {
-    thread::spawn(move || match io::load_path(&path) {
-        Ok(img) => {
-            let _ = tx.send(Job::Loaded {
-                name: file_stem(&path),
-                img,
-            });
-        }
-        Err(e) => {
-            let _ = tx.send(Job::Failed(e));
+    thread::spawn(move || {
+        let _ = tx.send(Job::Busy("Decoding…"));
+        match io::load_path(&path) {
+            Ok(img) => {
+                let _ = tx.send(Job::Loaded {
+                    name: file_stem(&path),
+                    img,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(Job::Failed(e));
+            }
         }
     });
 }
@@ -1178,6 +1485,26 @@ fn archive_dial_f32(
     archive_dial(ui, label, value, range, display)
 }
 
+fn archive_dial_u32(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> bool {
+    let mut f = *value as f32;
+    let lo = *range.start() as f32;
+    let hi = *range.end() as f32;
+    let display = format!("{}", *value);
+    let dragged = archive_dial(ui, label, &mut f, lo..=hi, display);
+    let nv = f.round().clamp(lo, hi) as u32;
+    if nv != *value {
+        *value = nv;
+        true
+    } else {
+        dragged && false
+    }
+}
+
 fn fit_rect(avail: Rect, img_w: f32, img_h: f32) -> Rect {
     let ia = img_w.max(1.0) / img_h.max(1.0);
     let aa = avail.width() / avail.height().max(1.0);
@@ -1289,4 +1616,60 @@ fn install_fonts(ctx: &egui::Context) {
             .push("mono_blocks".into());
     }
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod drop_url_tests {
+    use super::*;
+
+    #[test]
+    fn html_img_src_upgrades_pinterest_thumb() {
+        let html = r#"<img src="//i.pinimg.com/236x/ab/cd/ef.jpg" alt="pin">"#;
+        let urls = rank_drop_urls(urls_from_payload("text/html", html));
+        assert_eq!(
+            urls,
+            vec!["https://i.pinimg.com/originals/ab/cd/ef.jpg".to_string()]
+        );
+    }
+
+    #[test]
+    fn html_srcset_prefers_pinimg_over_pin_page() {
+        let html = concat!(
+            r#"<a href="https://www.pinterest.com/pin/123">"#,
+            r#"<img srcset="https://i.pinimg.com/236x/aa/bb/cc.jpg 236w, https://i.pinimg.com/736x/aa/bb/cc.jpg 736w" "#,
+            r#"src="https://i.pinimg.com/236x/aa/bb/cc.jpg">"#,
+            "</a>"
+        );
+        let urls = rank_drop_urls(urls_from_payload("text/html", html));
+        assert_eq!(urls[0], "https://i.pinimg.com/originals/aa/bb/cc.jpg");
+        assert!(!urls.iter().any(|u| u.contains("pinterest.com/pin/")));
+    }
+
+    #[test]
+    fn uri_list_skips_comments_and_pages() {
+        let raw = "# comment\nhttps://i.pinimg.com/474x/de/ad/be.jpg\nhttps://www.pinterest.com/pin/99/\n";
+        let urls = rank_drop_urls(urls_from_payload("text/uri-list", raw));
+        assert_eq!(urls[0], "https://i.pinimg.com/originals/de/ad/be.jpg");
+    }
+
+    #[test]
+    fn rejects_javascript_and_bare_paths() {
+        assert!(normalize_drop_url("javascript:alert(1)").is_none());
+        assert!(normalize_drop_url("/local/photo.jpg").is_none());
+        assert!(normalize_drop_url("").is_none());
+    }
+
+    #[test]
+    fn html_page_bytes_are_rejected() {
+        assert!(looks_like_html_page(b"<!DOCTYPE html><html>"));
+        assert!(!looks_like_html_page(b"\xff\xd8\xff\xe0"));
+    }
+
+    #[test]
+    fn still_name_strips_query() {
+        assert_eq!(
+            still_name_from_url("https://i.pinimg.com/originals/ab/cd/ef.jpg?foo=1"),
+            "ef.jpg"
+        );
+    }
 }

@@ -17,7 +17,7 @@ from pathlib import Path
 
 TITLE = "Cosmic Archive — ASCII"
 BINARY_NAME = "ascii-image-generator"
-DEFAULT_SIZE = (1100, 680)
+DEFAULT_SIZE = (1100, 820)
 DEFAULT_POS = (24, 48)
 DEFAULT_WORKSPACE = 5
 LAUNCH_TIMEOUT = 45
@@ -44,6 +44,11 @@ HANDLES = {
     "density.32": "density_32",
     "density.80": "density_80",
     "density.132": "density_132",
+    "density": "density",
+    "colour.source": "colour_source",
+    "colour.visor": "colour_visor",
+    "colour.amber": "colour_amber",
+    "colour.cream": "colour_cream",
     "invert": "invert",
     "knob": "knob",
     "out.txt": "out_txt",
@@ -172,6 +177,18 @@ def handle_point(handle: str, geom: dict) -> tuple[float, float]:
         sb + MARGIN + 2.0 * (CHIP_W + 6.0) + CHIP_W / 2.0,
     ]
     full_x = sb + MARGIN + CONTENT_W / 2.0
+
+    def density_x(cols: float) -> float:
+        t = (cols - 16.0) / (200.0 - 16.0)
+        return sb + MARGIN + CONTENT_W * t
+
+    density_y = 454.0
+    colour_y0 = 508.0
+    colour_y1 = 540.0
+    invert_y = 592.0
+    knob_y = 633.0
+    out_y = 747.0
+    copy_y = 787.0
     key = HANDLES[handle]
     local = {
         "open_still": (full_x, 112.0),
@@ -182,15 +199,20 @@ def handle_point(handle: str, geom: dict) -> tuple[float, float]:
         "look_ansi": (right_x, 298.0),
         "mark_cells": (left_x, 370.0),
         "mark_chars": (right_x, 370.0),
-        "density_32": (chip_xs[0], 446.0),
-        "density_80": (chip_xs[1], 446.0),
-        "density_132": (chip_xs[2], 446.0),
-        "invert": (full_x, 487.0),
-        "knob": (sb + MARGIN + CONTENT_W * 0.80, 528.0),
-        "out_txt": (chip_xs[0], 642.0),
-        "out_svg": (chip_xs[1], 642.0),
-        "out_ansi": (chip_xs[2], 642.0),
-        "copy_txt": (full_x, 682.0),
+        "density_32": (density_x(32), density_y),
+        "density_80": (density_x(80), density_y),
+        "density_132": (density_x(132), density_y),
+        "density": (sb + MARGIN + CONTENT_W * 0.80, density_y),
+        "colour_source": (left_x, colour_y0),
+        "colour_visor": (right_x, colour_y0),
+        "colour_amber": (left_x, colour_y1),
+        "colour_cream": (right_x, colour_y1),
+        "invert": (full_x, invert_y),
+        "knob": (sb + MARGIN + CONTENT_W * 0.80, knob_y),
+        "out_txt": (chip_xs[0], out_y),
+        "out_svg": (chip_xs[1], out_y),
+        "out_ansi": (chip_xs[2], out_y),
+        "copy_txt": (full_x, copy_y),
     }[key]
     return ax + local[0], ay + local[1]
 

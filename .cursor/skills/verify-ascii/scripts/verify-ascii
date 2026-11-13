@@ -192,15 +192,15 @@ def handle_point(handle: str, geom: dict) -> tuple[float, float]:
         return sb + MARGIN + CONTENT_W * t
 
     density_y = 454.0
-    colour_y0 = 508.0
-    colour_y1 = 540.0
-    colour_duo_y = 572.0
-    colour_ink_y = 604.0
-    invert_y = 624.0
-    knob_y = 665.0
-    out_y = 779.0
-    out_fmt_y = 811.0
-    copy_y = 851.0
+    colour_y0 = 557.0
+    colour_y1 = 589.0
+    colour_duo_y = 651.0
+    colour_ink_y = 691.0
+    invert_y = 709.0
+    knob_y = 750.0
+    out_y = 864.0
+    out_fmt_y = 896.0
+    copy_y = 936.0
     key = HANDLES[handle]
     local = {
         "open_still": (full_x, 112.0),

@@ -11,12 +11,12 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
-use ascii::{next_duo_swatch, Cell, ColorKind, Look, Mark, Settings};
+use ascii::{Cell, ColorKind, Look, Mark, Settings};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, Galley,
-    Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
+    Layout, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
 };
 use eframe::emath::{self, Align};
 use image::RgbaImage;
@@ -539,13 +539,10 @@ impl App {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 let w = (ui.available_width() - gap) / 2.0;
-                if chip(ui, w, "INK", true, reduced).clicked() {
-                    self.settings.duo_ink = next_duo_swatch(self.settings.duo_ink);
+                if duo_picker(ui, w, "INK", &mut self.settings.duo_ink) {
                     self.dirty = true;
                 }
-                if chip(ui, w, "PAPER", true, reduced).clicked() {
-                    self.settings.duo_paper =
-                        next_duo_swatch(self.settings.duo_paper);
+                if duo_picker(ui, w, "PAPER", &mut self.settings.duo_paper) {
                     self.dirty = true;
                 }
             });
@@ -1623,6 +1620,43 @@ fn chip(
         if on { CREAM } else { SAGE },
     );
     resp
+}
+
+fn duo_picker(ui: &mut egui::Ui, width: f32, label: &str, rgb: &mut [u8; 3]) -> bool {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, HIT),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            let rect = ui.max_rect();
+            ui.painter().rect_filled(
+                rect,
+                CornerRadius::same(2),
+                Color32::from_rgb(0x0c, 0x0d, 0x10),
+            );
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same(2),
+                Stroke::new(1.0_f32, CREAM.gamma_multiply(0.28)),
+                egui::StrokeKind::Middle,
+            );
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(label)
+                    .family(FontFamily::Monospace)
+                    .size(11.0)
+                    .color(CREAM),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                ui.spacing_mut().interact_size = Vec2::splat(24.0);
+                ui.color_edit_button_srgb(rgb).changed()
+            })
+            .inner
+        },
+    )
+    .inner
 }
 
 fn archive_dial(

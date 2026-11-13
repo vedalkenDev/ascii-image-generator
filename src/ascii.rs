@@ -14,17 +14,6 @@ const GROUND_RGB: [u8; 3] = [0x05, 0x05, 0x08];
 const CHARCOAL_RGB: [u8; 3] = [0x24, 0x2a, 0x30];
 const AMBER_RGB: [u8; 3] = [0xc1, 0x8d, 0x5d];
 const AMBER_LO: [u8; 3] = [0x18, 0x0e, 0x06];
-pub const DUO_SWATCHES: [[u8; 3]; 9] = [
-    [0x59, 0x2a, 0xa4],
-    [0x42, 0x77, 0xa2],
-    [0x3f, 0xb6, 0xaf],
-    [0x93, 0x9e, 0x7a],
-    [0xc1, 0x8d, 0x5d],
-    [0xd9, 0x63, 0x50],
-    CREAM_RGB,
-    CHARCOAL_RGB,
-    GROUND_RGB,
-];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Charset {
@@ -75,14 +64,6 @@ impl ColorKind {
             Self::Duo => "DUO",
         }
     }
-}
-
-pub fn next_duo_swatch(cur: [u8; 3]) -> [u8; 3] {
-    let i = DUO_SWATCHES
-        .iter()
-        .position(|c| *c == cur)
-        .unwrap_or(0);
-    DUO_SWATCHES[(i + 1) % DUO_SWATCHES.len()]
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -437,6 +418,18 @@ mod tests {
         let ramp = s.charset.ramp();
         assert!(cells.iter().all(|c| ramp.contains(&c.ch)));
         assert!(cells.iter().all(|c| c.color == s.duo_paper));
+    }
+
+    #[test]
+    fn duotone_accepts_arbitrary_rgb() {
+        let black = RgbaImage::from_pixel(20, 20, image::Rgba([0, 0, 0, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        s.color_kind = ColorKind::Duo;
+        s.duo_ink = [0x12, 0xc8, 0x28];
+        s.duo_paper = [0xee, 0x11, 0x99];
+        let (_, _, dark) = convert(&black, &s);
+        assert!(dark.iter().all(|c| c.color == s.duo_ink));
     }
 
     #[test]

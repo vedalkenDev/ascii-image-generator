@@ -11,7 +11,21 @@ Built installers live on the [v0.1.0 release](https://github.com/vedalkenDev/asc
 - [Windows x64 `.exe`](https://github.com/vedalkenDev/ascii-image-generator/releases/download/v0.1.0/Cosmic-Archive-ASCII-windows-x64.exe)
 - [macOS `.dmg`](https://github.com/vedalkenDev/ascii-image-generator/releases/download/v0.1.0/Cosmic-Archive-ASCII-macos.dmg) (Intel and Apple Silicon)
 
-The Windows build is a single unsigned exe. On macOS, right-click Open the first time — the disk image is unsigned, so Gatekeeper will warn. Linux still builds from source below.
+The Windows build is a single unsigned exe. The macOS disk image is **unsigned and not notarized**, so current macOS will show **“Cosmic Archive ASCII.app Not Opened”** / Apple could not verify it. That is Gatekeeper, not a broken app.
+
+To open it:
+
+1. Dismiss **Done**.
+2. Open **System Settings → Privacy & Security**, scroll to **Security**.
+3. Choose **Open Anyway** for Cosmic Archive ASCII, then confirm.
+
+Or in Terminal, after you copy the app out of the disk image:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Cosmic Archive ASCII.app"
+```
+
+A paid Apple Developer ID and notarization would remove that dialog. This repo does not have those. Linux still builds from source below.
 
 ## Looks
 

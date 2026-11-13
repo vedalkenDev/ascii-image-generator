@@ -6,10 +6,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
-use ascii::{Cell, Charset, Mode, Settings};
+use ascii::{Cell, Look, Settings};
 use eframe::egui::{
-    self, Color32, ColorImage, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame,
-    Galley, Margin, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, Galley,
+    Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
 };
 use eframe::emath::{self, Align};
 use image::RgbaImage;
@@ -19,7 +19,7 @@ const CHARCOAL: Color32 = Color32::from_rgb(0x24, 0x2a, 0x30);
 const CREAM: Color32 = Color32::from_rgb(0xf4, 0xf3, 0xe8);
 const SAGE: Color32 = Color32::from_rgb(0x93, 0x9e, 0x7a);
 const TEAL: Color32 = Color32::from_rgb(0x3f, 0xb6, 0xaf);
-const BLUE: Color32 = Color32::from_rgb(0x42, 0x77, 0xa2);
+const AMBER: Color32 = Color32::from_rgb(0xc1, 0x8d, 0x5d);
 const CORAL: Color32 = Color32::from_rgb(0xd9, 0x63, 0x50);
 const HIT: f32 = 40.0;
 const OPEN_FILTERS: &[&str] = &[
@@ -48,12 +48,19 @@ fn main() -> eframe::Result {
     )
 }
 
+#[derive(Clone)]
+struct LookThumb {
+    look: Look,
+    cols: u32,
+    rows: u32,
+    grid: Vec<Cell>,
+}
+
 struct App {
     settings: Settings,
-    mode: Mode,
+    look: Look,
     source: Option<RgbaImage>,
     source_name: String,
-    texture: Option<TextureHandle>,
     grid: Vec<Cell>,
     cols: u32,
     rows: u32,
@@ -64,7 +71,10 @@ struct App {
     jobs_rx: Receiver<Job>,
     busy: Option<&'static str>,
     grid_gen: u64,
+    source_gen: u64,
     preview: Option<(u64, Vec2, Vec<Arc<Galley>>)>,
+    thumbs: Option<((u64, bool), [LookThumb; 4])>,
+    notice: Option<String>,
 }
 
 impl App {
@@ -72,12 +82,13 @@ impl App {
         install_fonts(&cc.egui_ctx);
         apply_theme(&cc.egui_ctx);
         let (jobs_tx, jobs_rx) = mpsc::channel();
+        let mut settings = Settings::default();
+        Look::Visor.apply(&mut settings);
         let mut app = Self {
-            settings: Settings::default(),
-            mode: Mode::Ascii,
+            settings,
+            look: Look::Visor,
             source: None,
             source_name: String::new(),
-            texture: None,
             grid: Vec::new(),
             cols: 0,
             rows: 0,
@@ -88,7 +99,10 @@ impl App {
             jobs_rx,
             busy: None,
             grid_gen: 0,
+            source_gen: 0,
             preview: None,
+            thumbs: None,
+            notice: None,
         };
         if let Some(path) = std::env::args().nth(1) {
             app.busy = Some("Decoding…");
@@ -97,14 +111,50 @@ impl App {
         app
     }
 
-    fn set_source(&mut self, img: RgbaImage, name: String, ctx: &egui::Context) {
-        let size = [img.width() as usize, img.height() as usize];
-        let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-        self.texture = Some(ctx.load_texture("source", color, TextureOptions::LINEAR));
+    fn set_source(&mut self, img: RgbaImage, name: String, _ctx: &egui::Context) {
         self.source = Some(img);
         self.source_name = name;
         self.error = None;
+        self.notice = None;
+        self.source_gen = self.source_gen.wrapping_add(1);
+        self.thumbs = None;
         self.dirty = true;
+    }
+
+    fn apply_look(&mut self, look: Look) {
+        self.look = look;
+        look.apply(&mut self.settings);
+        self.dirty = true;
+    }
+
+    fn ensure_thumbs(&mut self) {
+        let key = (self.source_gen, self.settings.invert);
+        if self
+            .thumbs
+            .as_ref()
+            .is_some_and(|(k, _)| *k == key)
+        {
+            return;
+        }
+        let Some(img) = &self.source else {
+            self.thumbs = None;
+            return;
+        };
+        let invert = self.settings.invert;
+        let cards = Look::ALL.map(|look| {
+            let mut s = Settings::default();
+            look.apply(&mut s);
+            s.cols = 28;
+            s.invert = invert;
+            let (cols, rows, grid) = ascii::convert(img, &s);
+            LookThumb {
+                look,
+                cols,
+                rows,
+                grid,
+            }
+        });
+        self.thumbs = Some((key, cards));
     }
 
     fn rebuild(&mut self) {
@@ -181,6 +231,16 @@ impl App {
         spawn_pick(self.jobs_tx.clone());
     }
 
+    fn copy_txt(&mut self, ctx: &egui::Context) {
+        if self.grid.is_empty() {
+            self.error = Some("Load a still first.".into());
+            return;
+        }
+        ctx.copy_text(io::to_txt(self.cols, self.rows, &self.grid));
+        self.notice = Some("copied".into());
+        self.error = None;
+    }
+
     fn save_export(&mut self, kind: io::ExportKind) {
         if self.busy.is_some() {
             return;
@@ -218,117 +278,146 @@ impl eframe::App for App {
 
         egui::SidePanel::right("controls")
             .resizable(false)
-            .exact_width(280.0)
+            .exact_width(320.0)
             .frame(
                 Frame::new()
-                    .fill(CHARCOAL)
-                    .inner_margin(Margin::same(16))
+                    .fill(GROUND)
+                    .inner_margin(Margin::same(14))
                     .stroke(Stroke::NONE),
             )
             .show(ctx, |ui| {
                 let seam = ui.max_rect();
+                ui.painter().rect_filled(
+                    Rect::from_min_max(seam.min, Pos2::new(seam.max.x, seam.min.y + 3.0)),
+                    0,
+                    TEAL,
+                );
+                ui.painter().rect_filled(
+                    Rect::from_min_max(
+                        Pos2::new(seam.min.x, seam.min.y + 3.0),
+                        Pos2::new(seam.max.x, seam.min.y + 16.0),
+                    ),
+                    0,
+                    TEAL.gamma_multiply(0.10),
+                );
                 ui.painter().vline(
                     seam.left() + 0.5,
                     seam.y_range(),
-                    Stroke::new(1.0_f32, TEAL.gamma_multiply(0.45)),
+                    Stroke::new(1.0_f32, CREAM.gamma_multiply(0.28)),
                 );
+                self.ensure_thumbs();
+                let thumbs = self.thumbs.as_ref().map(|(_, cards)| cards.clone());
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 8.0);
-                        brand(ui, reduced);
-                        ui.label(
-                            RichText::new("ASCII stills")
-                                .family(FontFamily::Monospace)
-                                .size(18.0)
-                                .color(CREAM)
-                                .extra_letter_spacing(0.6),
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                        ui.add_space(4.0);
+                        archive_plate(
+                            ui,
+                            reduced,
+                            &self.source_name,
+                            self.look,
+                            self.cols,
+                            self.rows,
                         );
-                        if !self.source_name.is_empty() {
-                            ui.label(RichText::new(&self.source_name).size(12.0).color(SAGE));
-                        }
-                        let open_label = busy.unwrap_or("Open still");
+                        let open_label = busy.unwrap_or("OPEN STILL");
                         if press_button(ui, open_label, reduced).clicked() {
                             self.open_dialog();
                         }
                         if let Some(err) = &self.error {
                             ui.label(RichText::new(err).color(CORAL).size(12.0));
+                        } else if let Some(note) = &self.notice {
+                            ui.label(
+                                RichText::new(note)
+                                    .family(FontFamily::Monospace)
+                                    .color(SAGE)
+                                    .size(12.0),
+                            );
                         }
 
-                        section(ui, "Dials");
-                        if dial_u32(ui, "Columns", &mut self.settings.cols, 20..=240) {
-                            self.dirty = true;
-                        }
-                        if dial_f32(ui, "Contrast", &mut self.settings.contrast, 0.4..=2.4) {
-                            self.dirty = true;
-                        }
-                        if dial_f32(ui, "Saturation", &mut self.settings.saturation, 0.0..=2.0) {
-                            self.dirty = true;
-                        }
-                        if dial_f32(ui, "Brightness", &mut self.settings.brightness, -0.5..=0.5)
-                        {
-                            self.dirty = true;
-                        }
-                        if toggle_row(ui, "Invert", &mut self.settings.invert) {
-                            self.dirty = true;
-                        }
-                        if toggle_row(ui, "Color", &mut self.settings.color) {
-                            self.dirty = true;
-                        }
-
-                        section(ui, "Characters");
-                        for set in [Charset::Alphanumeric, Charset::Blocks, Charset::Punctuation]
-                        {
-                            if segment(
-                                ui,
-                                ui.available_width(),
-                                set.label(),
-                                self.settings.charset == set,
-                                reduced,
-                            )
-                            .clicked()
-                            {
-                                self.settings.charset = set;
-                                self.dirty = true;
-                            }
+                        section(ui, "LOOK");
+                        let gap = 6.0;
+                        let card_w = (ui.available_width() - gap) / 2.0;
+                        for pair in Look::ALL.chunks(2) {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = gap;
+                                for look in pair {
+                                    let thumb = thumbs.as_ref().and_then(|cards| {
+                                        cards.iter().find(|t| t.look == *look)
+                                    });
+                                    if look_card(
+                                        ui,
+                                        card_w,
+                                        *look,
+                                        self.look == *look,
+                                        thumb,
+                                        reduced,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.apply_look(*look);
+                                    }
+                                }
+                            });
                         }
 
-                        section(ui, "Mode");
+                        section(ui, "DENSITY");
                         ui.horizontal(|ui| {
-                            let w = (ui.available_width() - 6.0) / 2.0;
-                            if segment(ui, w, "Overlay", self.mode == Mode::Overlay, reduced)
-                                .clicked()
-                            {
-                                self.mode = Mode::Overlay;
-                            }
-                            if segment(ui, w, "ASCII", self.mode == Mode::Ascii, reduced)
-                                .clicked()
-                            {
-                                self.mode = Mode::Ascii;
+                            let w = (ui.available_width() - 12.0) / 3.0;
+                            for n in [32_u32, 80, 132] {
+                                if chip(ui, w, &n.to_string(), self.settings.cols == n, reduced)
+                                    .clicked()
+                                {
+                                    self.settings.cols = n;
+                                    self.dirty = true;
+                                }
                             }
                         });
 
-                        section(ui, "Export");
-                        let kinds = [
-                            io::ExportKind::Txt,
-                            io::ExportKind::Png,
-                            io::ExportKind::Svg,
-                            io::ExportKind::Html,
-                            io::ExportKind::Ansi,
-                        ];
-                        let cell_w = (ui.available_width() - 12.0) / 3.0;
-                        ui.horizontal_wrapped(|ui| {
-                            for kind in kinds {
-                                if chip(ui, cell_w, kind.label(), reduced).clicked() {
+                        section(ui, self.look.name());
+                        if chip(
+                            ui,
+                            ui.available_width(),
+                            if self.settings.invert {
+                                "INVERT ON"
+                            } else {
+                                "INVERT"
+                            },
+                            self.settings.invert,
+                            reduced,
+                        )
+                        .clicked()
+                        {
+                            self.settings.invert = !self.settings.invert;
+                            self.dirty = true;
+                        }
+                        let (knob, range) = self.look.knob();
+                        let analog = match self.look {
+                            Look::Visor | Look::Blocks => &mut self.settings.contrast,
+                            Look::Crt => &mut self.settings.brightness,
+                            Look::Ansi => &mut self.settings.saturation,
+                        };
+                        if archive_dial_f32(ui, knob, analog, range, 2) {
+                            self.dirty = true;
+                        }
+
+                        section(ui, "OUT");
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 12.0) / 3.0;
+                            for kind in [
+                                io::ExportKind::Txt,
+                                io::ExportKind::Svg,
+                                io::ExportKind::Ansi,
+                            ] {
+                                if chip(ui, w, kind.label(), false, reduced).clicked() {
                                     self.save_export(kind);
                                 }
                             }
                         });
-                        ui.label(
-                            RichText::new("Drop PNG, JPEG, WebP, GIF, BMP, TIFF, or SVG.")
-                                .size(11.0)
-                                .color(SAGE),
-                        );
+                        if chip(ui, ui.available_width(), "COPY TXT", false, reduced).clicked()
+                        {
+                            self.copy_txt(ui.ctx());
+                        }
                     });
             });
 
@@ -465,8 +554,46 @@ fn spawn_save(
     });
 }
 
-fn brand(ui: &mut egui::Ui, reduced: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+fn archive_plate(
+    ui: &mut egui::Ui,
+    reduced: bool,
+    name: &str,
+    look: Look,
+    cols: u32,
+    rows: u32,
+) {
+    let h = if name.is_empty() { 52.0 } else { 68.0 };
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+    let p = ui.painter();
+    p.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(1.0_f32, CREAM.gamma_multiply(0.38)),
+        egui::StrokeKind::Inside,
+    );
+    let tick = 9.0;
+    let stroke = Stroke::new(1.6_f32, CREAM);
+    p.line_segment([rect.left_top(), rect.left_top() + Vec2::new(tick, 0.0)], stroke);
+    p.line_segment([rect.left_top(), rect.left_top() + Vec2::new(0.0, tick)], stroke);
+    p.line_segment([rect.right_top(), rect.right_top() + Vec2::new(-tick, 0.0)], stroke);
+    p.line_segment([rect.right_top(), rect.right_top() + Vec2::new(0.0, tick)], stroke);
+    p.line_segment(
+        [rect.left_bottom(), rect.left_bottom() + Vec2::new(tick, 0.0)],
+        stroke,
+    );
+    p.line_segment(
+        [rect.left_bottom(), rect.left_bottom() + Vec2::new(0.0, -tick)],
+        stroke,
+    );
+    p.line_segment(
+        [rect.right_bottom(), rect.right_bottom() + Vec2::new(-tick, 0.0)],
+        stroke,
+    );
+    p.line_segment(
+        [rect.right_bottom(), rect.right_bottom() + Vec2::new(0.0, -tick)],
+        stroke,
+    );
+
     let font = FontId::monospace(11.0);
     let job = |color: Color32| {
         let mut job = egui::text::LayoutJob::default();
@@ -482,41 +609,92 @@ fn brand(ui: &mut egui::Ui, reduced: bool) {
         );
         job
     };
-    let painter = ui.painter();
-    let pos = Pos2::new(rect.left(), rect.top());
+    let pos = rect.min + Vec2::new(10.0, 8.0);
     if !reduced {
-        painter.galley(
+        p.galley(
             pos + Vec2::new(1.0, 0.0),
-            painter.layout_job(job(CORAL.gamma_multiply(0.75))),
+            p.layout_job(job(CORAL.gamma_multiply(0.75))),
             CORAL,
         );
-        painter.galley(
+        p.galley(
             pos + Vec2::new(-1.0, 0.0),
-            painter.layout_job(job(TEAL.gamma_multiply(0.75))),
+            p.layout_job(job(TEAL.gamma_multiply(0.75))),
             TEAL,
         );
     }
-    painter.galley(pos, painter.layout_job(job(CREAM)), CREAM);
+    p.galley(pos, p.layout_job(job(CREAM)), CREAM);
+
+    let meta = if cols > 0 {
+        format!("{}  {cols}×{rows}", look.name())
+    } else {
+        format!("{}  no still", look.name())
+    };
+    p.text(
+        rect.min + Vec2::new(10.0, 28.0),
+        egui::Align2::LEFT_TOP,
+        meta,
+        FontId::monospace(12.0),
+        AMBER,
+    );
+    if !name.is_empty() {
+        p.text(
+            rect.min + Vec2::new(10.0, 46.0),
+            egui::Align2::LEFT_TOP,
+            name,
+            FontId::monospace(12.0),
+            SAGE,
+        );
+    }
+}
+
+fn look_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    look: Look,
+    on: bool,
+    thumb: Option<&LookThumb>,
+    reduced: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 86.0), Sense::click());
+    let s = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
+    let r = Rect::from_center_size(rect.center(), rect.size() * s);
+    ui.painter().rect_filled(r, CornerRadius::same(2), CHARCOAL);
+    ui.painter().rect_stroke(
+        r,
+        CornerRadius::same(2),
+        Stroke::new(1.0_f32, if on { CREAM } else { CREAM.gamma_multiply(0.22) }),
+        egui::StrokeKind::Middle,
+    );
+    let label_h = 16.0;
+    let preview = Rect::from_min_max(
+        r.min + Vec2::new(6.0, 6.0),
+        Pos2::new(r.max.x - 6.0, r.max.y - label_h - 4.0),
+    );
+    ui.painter()
+        .rect_filled(preview, 0, Color32::from_rgb(0x08, 0x09, 0x0c));
+    if let Some(thumb) = thumb {
+        paint_cells(ui, preview, thumb.cols, thumb.rows, &thumb.grid);
+    } else {
+        ui.painter().text(
+            preview.center(),
+            egui::Align2::CENTER_CENTER,
+            look.name(),
+            FontId::monospace(11.0),
+            SAGE,
+        );
+    }
+    ui.painter().text(
+        Pos2::new(r.center().x, r.max.y - 10.0),
+        egui::Align2::CENTER_CENTER,
+        look.name(),
+        FontId::monospace(11.0),
+        if on { CREAM } else { SAGE },
+    );
+    resp
 }
 
 fn paint_preview(ui: &egui::Ui, rect: Rect, app: &mut App) {
-    let painter = ui.painter_at(rect);
-    match app.mode {
-        Mode::Overlay => {
-            if let Some(tex) = &app.texture {
-                painter.image(
-                    tex.id(),
-                    rect,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            }
-            painter.rect_filled(rect, 0, Color32::from_black_alpha(90));
-        }
-        Mode::Ascii => {
-            painter.rect_filled(rect, 0, GROUND);
-        }
-    }
+    ui.painter_at(rect).rect_filled(rect, 0, GROUND);
     if app.cols == 0 || app.rows == 0 {
         return;
     }
@@ -526,46 +704,12 @@ fn paint_preview(ui: &egui::Ui, rect: Rect, app: &mut App) {
         None => true,
     };
     if miss {
-        let font_size = rect.height() / app.rows as f32;
-        let font = FontId::monospace(font_size);
-        let gw = rect.width() / app.cols as f32;
-        let mut galleys = Vec::with_capacity(app.rows as usize);
-        for y in 0..app.rows {
-            let mut job = egui::text::LayoutJob::default();
-            job.wrap.max_width = f32::INFINITY;
-            let row = y * app.cols;
-            let mut x = 0;
-            while x < app.cols {
-                let cell = app.grid[(row + x) as usize];
-                let mut run = String::new();
-                run.push(cell.ch);
-                x += 1;
-                while x < app.cols {
-                    let next = app.grid[(row + x) as usize];
-                    if next.color != cell.color {
-                        break;
-                    }
-                    run.push(next.ch);
-                    x += 1;
-                }
-                let c = cell.color;
-                job.append(
-                    &run,
-                    0.0,
-                    egui::TextFormat {
-                        font_id: font.clone(),
-                        color: Color32::from_rgb(c[0], c[1], c[2]),
-                        extra_letter_spacing: gw - font_size * 0.6,
-                        ..Default::default()
-                    },
-                );
-            }
-            galleys.push(painter.layout_job(job));
-        }
+        let galleys = layout_cells(ui, rect, app.cols, app.rows, &app.grid);
         app.preview = Some((app.grid_gen, size, galleys));
     }
     if let Some((_, _, galleys)) = &app.preview {
         let font_size = rect.height() / app.rows as f32;
+        let painter = ui.painter_at(rect);
         for (y, galley) in galleys.iter().enumerate() {
             let pos = Pos2::new(rect.left(), rect.top() + y as f32 * font_size);
             painter.galley(pos, galley.clone(), CREAM);
@@ -573,13 +717,82 @@ fn paint_preview(ui: &egui::Ui, rect: Rect, app: &mut App) {
     }
 }
 
+fn paint_cells(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) {
+    if cols == 0 || rows == 0 || grid.is_empty() {
+        return;
+    }
+    let galleys = layout_cells(ui, rect, cols, rows, grid);
+    let font_size = rect.height() / rows as f32;
+    let painter = ui.painter_at(rect);
+    for (y, galley) in galleys.iter().enumerate() {
+        let pos = Pos2::new(rect.left(), rect.top() + y as f32 * font_size);
+        painter.galley(pos, galley.clone(), CREAM);
+    }
+}
+
+fn layout_cells(
+    ui: &egui::Ui,
+    rect: Rect,
+    cols: u32,
+    rows: u32,
+    grid: &[Cell],
+) -> Vec<Arc<Galley>> {
+    let painter = ui.painter();
+    let font_size = rect.height() / rows as f32;
+    let font = FontId::monospace(font_size);
+    let gw = rect.width() / cols as f32;
+    let mut galleys = Vec::with_capacity(rows as usize);
+    for y in 0..rows {
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = f32::INFINITY;
+        let row = y * cols;
+        let mut x = 0;
+        while x < cols {
+            let idx = (row + x) as usize;
+            if idx >= grid.len() {
+                break;
+            }
+            let cell = grid[idx];
+            let mut run = String::new();
+            run.push(cell.ch);
+            x += 1;
+            while x < cols {
+                let nidx = (row + x) as usize;
+                if nidx >= grid.len() {
+                    break;
+                }
+                let next = grid[nidx];
+                if next.color != cell.color {
+                    break;
+                }
+                run.push(next.ch);
+                x += 1;
+            }
+            let c = cell.color;
+            job.append(
+                &run,
+                0.0,
+                egui::TextFormat {
+                    font_id: font.clone(),
+                    color: Color32::from_rgb(c[0], c[1], c[2]),
+                    extra_letter_spacing: gw - font_size * 0.6,
+                    ..Default::default()
+                },
+            );
+        }
+        galleys.push(painter.layout_job(job));
+    }
+    galleys
+}
+
 fn section(ui: &mut egui::Ui, name: &str) {
-    ui.add_space(6.0);
+    ui.add_space(4.0);
     ui.label(
-        RichText::new(name)
+        RichText::new(format!(":: {name}"))
+            .family(FontFamily::Monospace)
             .size(11.0)
             .color(SAGE)
-            .extra_letter_spacing(0.8),
+            .extra_letter_spacing(1.4),
     );
 }
 
@@ -602,73 +815,53 @@ fn press_button(ui: &mut egui::Ui, label: &str, reduced: bool) -> egui::Response
     let s = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
     let r = Rect::from_center_size(rect.center(), rect.size() * s);
     let fill = if resp.hovered() {
-        Color32::from_rgb(0x2e, 0x36, 0x3c)
+        Color32::from_rgb(0x2e, 0x34, 0x3a)
     } else {
-        Color32::from_rgb(0x1b, 0x20, 0x25)
+        CHARCOAL
     };
-    ui.painter().rect_filled(r, CornerRadius::same(8), fill);
+    ui.painter().rect_filled(r, CornerRadius::same(2), fill);
     ui.painter().rect_stroke(
         r,
-        CornerRadius::same(8),
-        Stroke::new(1.0_f32, TEAL.gamma_multiply(0.55)),
+        CornerRadius::same(2),
+        Stroke::new(1.0_f32, CREAM.gamma_multiply(0.55)),
         egui::StrokeKind::Middle,
     );
     ui.painter().text(
         r.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        FontId::proportional(15.0),
+        FontId::monospace(13.0),
         CREAM,
     );
     resp
 }
 
-fn chip(ui: &mut egui::Ui, width: f32, label: &str, reduced: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::click());
-    let s = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
-    let r = Rect::from_center_size(rect.center(), rect.size() * s);
-    let fill = if resp.hovered() {
-        Color32::from_rgb(0x2e, 0x36, 0x3c)
-    } else {
-        Color32::from_rgb(0x1b, 0x20, 0x25)
-    };
-    ui.painter().rect_filled(r, CornerRadius::same(4), fill);
-    ui.painter().rect_stroke(
-        r,
-        CornerRadius::same(4),
-        Stroke::new(1.0_f32, TEAL.gamma_multiply(0.45)),
-        egui::StrokeKind::Middle,
-    );
-    ui.painter().text(
-        r.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        FontId::monospace(12.0),
-        CREAM,
-    );
-    resp
-}
-
-fn segment(ui: &mut egui::Ui, width: f32, label: &str, on: bool, reduced: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
+fn chip(
+    ui: &mut egui::Ui,
+    width: f32,
+    label: &str,
+    on: bool,
+    reduced: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::click());
     let s = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
     let r = Rect::from_center_size(rect.center(), rect.size() * s);
     let fill = if on {
-        Color32::from_rgb(0x1a, 0x3a, 0x3a)
+        CHARCOAL
     } else if resp.hovered() {
-        Color32::from_rgb(0x2e, 0x36, 0x3c)
-    } else {
         Color32::from_rgb(0x1b, 0x20, 0x25)
+    } else {
+        Color32::from_rgb(0x0c, 0x0d, 0x10)
     };
     let stroke = if on {
-        TEAL
+        CREAM
     } else {
-        Color32::from_rgb(0x3a, 0x42, 0x48)
+        CREAM.gamma_multiply(0.28)
     };
-    ui.painter().rect_filled(r, CornerRadius::same(6), fill);
+    ui.painter().rect_filled(r, CornerRadius::same(2), fill);
     ui.painter().rect_stroke(
         r,
-        CornerRadius::same(6),
+        CornerRadius::same(2),
         Stroke::new(1.0_f32, stroke),
         egui::StrokeKind::Middle,
     );
@@ -676,92 +869,83 @@ fn segment(ui: &mut egui::Ui, width: f32, label: &str, on: bool, reduced: bool) 
         r.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        FontId::monospace(12.0),
+        FontId::monospace(11.0),
         if on { CREAM } else { SAGE },
     );
     resp
 }
 
-fn dial_u32(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut u32,
-    range: std::ops::RangeInclusive<u32>,
-) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(13.0).color(CREAM));
-        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(format!("{value}"))
-                    .family(FontFamily::Monospace)
-                    .size(13.0)
-                    .color(TEAL),
-            );
-        });
-    });
-    ui.add(
-        egui::Slider::new(value, range)
-            .show_value(false)
-            .min_decimals(0),
-    )
-    .changed()
-}
-
-fn dial_f32(
+fn archive_dial(
     ui: &mut egui::Ui,
     label: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
+    display: String,
 ) -> bool {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(13.0).color(CREAM));
+        ui.label(
+            RichText::new(label)
+                .family(FontFamily::Monospace)
+                .size(12.0)
+                .color(CREAM),
+        );
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             ui.label(
-                RichText::new(format!("{value:.2}"))
+                RichText::new(display)
                     .family(FontFamily::Monospace)
-                    .size(13.0)
-                    .color(TEAL),
+                    .size(12.0)
+                    .color(AMBER),
             );
         });
     });
-    ui.add(egui::Slider::new(value, range).show_value(false))
-        .changed()
-}
-
-fn toggle_row(ui: &mut egui::Ui, label: &str, on: &mut bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
-    if resp.clicked() {
-        *on = !*on;
-    }
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(13.0),
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::click_and_drag());
+    let min = *range.start();
+    let max = *range.end();
+    let span = (max - min).max(f32::EPSILON);
+    let t = ((*value - min) / span).clamp(0.0, 1.0);
+    let p = ui.painter();
+    p.rect_filled(rect, 0, Color32::from_rgb(0x0c, 0x0d, 0x10));
+    p.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(1.0_f32, CREAM.gamma_multiply(0.22)),
+        egui::StrokeKind::Inside,
+    );
+    let fill = Rect::from_min_size(rect.min, Vec2::new((rect.width() * t).max(2.0), rect.height()));
+    p.rect_filled(fill, 0, TEAL.gamma_multiply(0.32));
+    let x = rect.left() + rect.width() * t;
+    p.rect_filled(
+        Rect::from_center_size(
+            Pos2::new(x, rect.center().y),
+            Vec2::new(2.0, rect.height() - 2.0),
+        ),
+        0,
         CREAM,
     );
-    let knob_w = 40.0;
-    let knob = Rect::from_center_size(
-        Pos2::new(rect.right() - knob_w / 2.0 - 2.0, rect.center().y),
-        Vec2::new(knob_w, 22.0),
-    );
-    ui.painter().rect_filled(
-        knob,
-        CornerRadius::same(11),
-        if *on {
-            TEAL
-        } else {
-            Color32::from_rgb(0x3a, 0x42, 0x48)
-        },
-    );
-    let x = if *on {
-        knob.right() - 11.0
-    } else {
-        knob.left() + 11.0
-    };
-    ui.painter()
-        .circle_filled(Pos2::new(x, knob.center().y), 7.0, CREAM);
-    resp.clicked()
+
+    if resp.dragged() || resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let nt = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+            let nv = min + nt * span;
+            if (nv - *value).abs() > f32::EPSILON {
+                *value = nv;
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn archive_dial_f32(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    decimals: usize,
+) -> bool {
+    let display = format!("{value:.decimals$}");
+    archive_dial(ui, label, value, range, display)
 }
 
 fn fit_rect(avail: Rect, img_w: f32, img_h: f32) -> Rect {
@@ -795,12 +979,12 @@ fn reduced_motion() -> bool {
 fn apply_theme(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     v.dark_mode = true;
-    v.panel_fill = CHARCOAL;
-    v.window_fill = CHARCOAL;
+    v.panel_fill = GROUND;
+    v.window_fill = GROUND;
     v.extreme_bg_color = GROUND;
     v.faint_bg_color = Color32::from_rgb(0x1b, 0x20, 0x25);
     v.override_text_color = Some(CREAM);
-    v.hyperlink_color = BLUE;
+    v.hyperlink_color = TEAL;
     v.warn_fg_color = TEAL;
     v.error_fg_color = CORAL;
     v.selection.bg_fill = TEAL.gamma_multiply(0.35);

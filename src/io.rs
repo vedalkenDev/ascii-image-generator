@@ -169,8 +169,10 @@ fn magick_downscale(bytes: &[u8]) -> Result<RgbaImage, String> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ExportKind {
     Txt,
+    #[allow(dead_code)]
     Png,
     Svg,
+    #[allow(dead_code)]
     Html,
     Ansi,
 }

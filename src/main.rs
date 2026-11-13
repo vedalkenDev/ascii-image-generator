@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
-use ascii::{Cell, Look, Settings};
+use ascii::{Cell, Look, Mark, Settings};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 use eframe::egui::{
@@ -29,6 +29,7 @@ const TEAL: Color32 = Color32::from_rgb(0x3f, 0xb6, 0xaf);
 const AMBER: Color32 = Color32::from_rgb(0xc1, 0x8d, 0x5d);
 const CORAL: Color32 = Color32::from_rgb(0xd9, 0x63, 0x50);
 const HIT: f32 = 40.0;
+#[cfg(not(target_arch = "wasm32"))]
 const OPEN_FILTERS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg",
 ];
@@ -105,7 +106,7 @@ struct App {
     grid_gen: u64,
     source_gen: u64,
     preview: Option<(u64, Vec2, Vec<Arc<Galley>>)>,
-    thumbs: Option<((u64, bool), [LookThumb; 4])>,
+    thumbs: Option<((u64, bool, Mark), [LookThumb; 4])>,
     notice: Option<String>,
 }
 
@@ -137,6 +138,8 @@ impl App {
             thumbs: None,
             notice: None,
         };
+        #[cfg(target_arch = "wasm32")]
+        install_web_still_hooks(app.jobs_tx.clone(), cc.egui_ctx.clone());
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = std::env::args().nth(1) {
             app.busy = Some("Decoding…");
@@ -162,7 +165,7 @@ impl App {
     }
 
     fn ensure_thumbs(&mut self) {
-        let key = (self.source_gen, self.settings.invert);
+        let key = (self.source_gen, self.settings.invert, self.settings.mark);
         if self
             .thumbs
             .as_ref()
@@ -266,8 +269,13 @@ impl App {
         if self.busy.is_some() {
             return;
         }
-        self.busy = Some("Opening…");
         self.error = None;
+        // Web: click the hidden <input> in this user-gesture. Do not flash
+        // Opening… — that was the janky delay before the picker appeared.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.busy = Some("Opening…");
+        }
         spawn_pick(self.jobs_tx.clone());
     }
 
@@ -344,7 +352,11 @@ impl eframe::App for App {
                             self.cols,
                             self.rows,
                         );
-                        let open_label = busy.unwrap_or("OPEN STILL");
+                        let open_label = busy.unwrap_or(if self.source.is_none() {
+                            "CHOOSE STILL"
+                        } else {
+                            "CHANGE STILL"
+                        });
                         if press_button(ui, open_label, reduced).clicked() {
                             self.open_dialog();
                         }
@@ -374,6 +386,7 @@ impl eframe::App for App {
                                         card_w,
                                         *look,
                                         self.look == *look,
+                                        self.settings.mark,
                                         thumb,
                                         reduced,
                                     )
@@ -384,6 +397,26 @@ impl eframe::App for App {
                                 }
                             });
                         }
+
+                        section(ui, "MARK");
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 6.0) / 2.0;
+                            for mark in [Mark::Cells, Mark::Chars] {
+                                if chip(
+                                    ui,
+                                    w,
+                                    mark.name(),
+                                    self.settings.mark == mark,
+                                    reduced,
+                                )
+                                .clicked()
+                                {
+                                    self.settings.mark = mark;
+                                    self.thumbs = None;
+                                    self.dirty = true;
+                                }
+                            }
+                        });
 
                         section(ui, "DENSITY");
                         ui.horizontal(|ui| {
@@ -466,7 +499,7 @@ impl eframe::App for App {
                     let (title, sub) = if busy.is_some() {
                         ("READING STILL", "the archive is decoding")
                     } else {
-                        ("NO STILL LOADED", "drop a still into the archive")
+                        ("NO STILL LOADED", "drop a photo here, or click to choose")
                     };
                     painter.text(
                         c - Vec2::new(0.0, 14.0),
@@ -533,20 +566,106 @@ fn spawn_pick(tx: Sender<Job>) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn spawn_pick(tx: Sender<Job>) {
+fn spawn_pick(_tx: Sender<Job>) {
+    click_still_input();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn click_still_input() {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(el) = document.get_element_by_id("still-input") else {
+        return;
+    };
+    let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() else {
+        return;
+    };
+    input.set_value("");
+    let _ = input.click();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_web_file(tx: Sender<Job>, ctx: egui::Context, file: web_sys::File) {
+    let name = file.name();
+    let promise = file.array_buffer();
     wasm_bindgen_futures::spawn_local(async move {
-        let Some(file) = rfd::AsyncFileDialog::new()
-            .add_filter("Image", OPEN_FILTERS)
-            .pick_file()
-            .await
-        else {
-            let _ = tx.send(Job::Idle);
+        match wasm_bindgen_futures::JsFuture::from(promise).await {
+            Ok(buf) => {
+                let arr = js_sys::Uint8Array::new(&buf);
+                let mut bytes = vec![0u8; arr.length() as usize];
+                arr.copy_to(&mut bytes);
+                finish_bytes(&tx, name, &bytes);
+            }
+            Err(_) => {
+                let _ = tx.send(Job::Failed("Could not read that file.".into()));
+            }
+        }
+        ctx.request_repaint();
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn install_web_still_hooks(tx: Sender<Job>, ctx: egui::Context) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use wasm_bindgen::closure::Closure;
+    use web_sys::{ClipboardEvent, HtmlInputElement};
+
+    static ONCE: AtomicBool = AtomicBool::new(false);
+    if ONCE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+
+    if let Some(el) = document.get_element_by_id("still-input") {
+        if let Ok(input) = el.dyn_into::<HtmlInputElement>() {
+            let tx_in = tx.clone();
+            let ctx_in = ctx.clone();
+            let on_change = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                let Ok(target) = event
+                    .target()
+                    .ok_or(())
+                    .and_then(|t| t.dyn_into::<HtmlInputElement>().map_err(|_| ()))
+                else {
+                    return;
+                };
+                let Some(files) = target.files() else {
+                    return;
+                };
+                let Some(file) = files.get(0) else {
+                    return;
+                };
+                let _ = tx_in.send(Job::Idle);
+                read_web_file(tx_in.clone(), ctx_in.clone(), file);
+            }) as Box<dyn FnMut(_)>);
+            let _ = input.add_event_listener_with_callback("change", on_change.as_ref().unchecked_ref());
+            on_change.forget();
+        }
+    }
+
+    let tx_paste = tx;
+    let ctx_paste = ctx;
+    let on_paste = Closure::wrap(Box::new(move |event: ClipboardEvent| {
+        let Some(dt) = event.clipboard_data() else {
             return;
         };
-        let name = file.file_name();
-        let bytes = file.read().await;
-        finish_bytes(&tx, name, &bytes);
-    });
+        let Some(files) = dt.files() else {
+            return;
+        };
+        let Some(file) = files.get(0) else {
+            return;
+        };
+        event.prevent_default();
+        let _ = tx_paste.send(Job::Idle);
+        read_web_file(tx_paste.clone(), ctx_paste.clone(), file);
+    }) as Box<dyn FnMut(_)>);
+    let _ = window.add_event_listener_with_callback("paste", on_paste.as_ref().unchecked_ref());
+    on_paste.forget();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -727,6 +846,7 @@ fn look_card(
     width: f32,
     look: Look,
     on: bool,
+    mark: Mark,
     thumb: Option<&LookThumb>,
     reduced: bool,
 ) -> egui::Response {
@@ -748,7 +868,7 @@ fn look_card(
     ui.painter()
         .rect_filled(preview, 0, Color32::from_rgb(0x08, 0x09, 0x0c));
     if let Some(thumb) = thumb {
-        paint_cells(ui, preview, thumb.cols, thumb.rows, &thumb.grid);
+        paint_grid(ui, preview, thumb.cols, thumb.rows, &thumb.grid, mark);
     } else {
         ui.painter().text(
             preview.center(),
@@ -773,6 +893,10 @@ fn paint_preview(ui: &egui::Ui, rect: Rect, app: &mut App) {
     if app.cols == 0 || app.rows == 0 {
         return;
     }
+    if app.settings.mark == Mark::Cells {
+        paint_mosaic(ui, rect, app.cols, app.rows, &app.grid);
+        return;
+    }
     let size = rect.size();
     let miss = match &app.preview {
         Some((gen, cached, _)) => *gen != app.grid_gen || (cached.x - size.x).abs() > 0.5,
@@ -792,8 +916,12 @@ fn paint_preview(ui: &egui::Ui, rect: Rect, app: &mut App) {
     }
 }
 
-fn paint_cells(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) {
+fn paint_grid(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell], mark: Mark) {
     if cols == 0 || rows == 0 || grid.is_empty() {
+        return;
+    }
+    if mark == Mark::Cells {
+        paint_mosaic(ui, rect, cols, rows, grid);
         return;
     }
     let galleys = layout_cells(ui, rect, cols, rows, grid);
@@ -802,6 +930,33 @@ fn paint_cells(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) {
     for (y, galley) in galleys.iter().enumerate() {
         let pos = Pos2::new(rect.left(), rect.top() + y as f32 * font_size);
         painter.galley(pos, galley.clone(), CREAM);
+    }
+}
+
+fn paint_mosaic(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0, GROUND);
+    for y in 0..rows {
+        let y0 = rect.top() + (y as f32 / rows as f32) * rect.height();
+        let y1 = rect.top() + ((y + 1) as f32 / rows as f32) * rect.height();
+        for x in 0..cols {
+            let idx = (y * cols + x) as usize;
+            if idx >= grid.len() {
+                continue;
+            }
+            let cell = grid[idx];
+            if cell.ch == ' ' {
+                continue;
+            }
+            let x0 = rect.left() + (x as f32 / cols as f32) * rect.width();
+            let x1 = rect.left() + ((x + 1) as f32 / cols as f32) * rect.width();
+            let r = Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)).shrink(0.4);
+            painter.rect_filled(
+                r,
+                0,
+                Color32::from_rgb(cell.color[0], cell.color[1], cell.color[2]),
+            );
+        }
     }
 }
 

@@ -43,6 +43,28 @@ pub enum ColorKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Cells,
+    Chars,
+}
+
+impl Mark {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cells => "CELLS",
+            Self::Chars => "CHARS",
+        }
+    }
+
+    pub fn aspect(self) -> f32 {
+        match self {
+            Self::Cells => 1.0,
+            Self::Chars => CHAR_ASPECT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Look {
     Visor,
     Blocks,
@@ -104,6 +126,7 @@ impl Look {
 pub struct Settings {
     pub cols: u32,
     pub charset: Charset,
+    pub mark: Mark,
     pub contrast: f32,
     pub saturation: f32,
     pub brightness: f32,
@@ -117,6 +140,7 @@ impl Default for Settings {
         Self {
             cols: 80,
             charset: Charset::Blocks,
+            mark: Mark::Cells,
             contrast: 1.0,
             saturation: 1.0,
             brightness: 0.0,
@@ -136,7 +160,7 @@ pub struct Cell {
 pub fn convert(img: &RgbaImage, s: &Settings) -> (u32, u32, Vec<Cell>) {
     let cols = s.cols.clamp(8, 400);
     let img_aspect = img.width().max(1) as f32 / img.height().max(1) as f32;
-    let rows = ((cols as f32 / img_aspect) * CHAR_ASPECT).round().max(1.0) as u32;
+    let rows = ((cols as f32 / img_aspect) * s.mark.aspect()).round().max(1.0) as u32;
     let cell_w = img.width() as f32 / cols as f32;
     let cell_h = img.height() as f32 / rows as f32;
     let ramp = s.charset.ramp();
@@ -274,11 +298,24 @@ mod tests {
         let mut s = Settings::default();
         s.cols = 20;
         s.charset = Charset::Blocks;
+        s.mark = Mark::Chars;
         let (cols, rows, cells) = convert(&img, &s);
         assert_eq!(cols, 20);
         assert_eq!(rows, 5);
         assert_eq!(cells.len(), 100);
         assert!(cells.iter().all(|c| c.ch == '█'));
+    }
+
+    #[test]
+    fn convert_cells_are_square() {
+        let img = RgbaImage::from_pixel(100, 50, image::Rgba([255, 255, 255, 255]));
+        let mut s = Settings::default();
+        s.cols = 20;
+        s.mark = Mark::Cells;
+        let (cols, rows, cells) = convert(&img, &s);
+        assert_eq!(cols, 20);
+        assert_eq!(rows, 10);
+        assert_eq!(cells.len(), 200);
     }
 
     #[test]

@@ -209,6 +209,7 @@ dependencies = [
  "getrandom 0.4.3",
  "image",
  "jpeg-decoder",
+ "js-sys",
  "resvg",
  "rfd",
  "wasm-bindgen",

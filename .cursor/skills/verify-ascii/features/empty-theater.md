@@ -1,6 +1,6 @@
 # Empty theater
 
-When no still is loaded, the theater is an empty archive frame: `NO STILL LOADED` over `drop a still into the archive`. Looks have no live thumbs. The plate reads `no still`.
+When no still is loaded, the theater is an empty archive frame: `NO STILL LOADED` over `drop a photo here, or click to choose`. Looks have no live thumbs. The plate reads `no still`.
 
 ## Sub-features
 
@@ -8,7 +8,7 @@ When no still is loaded, the theater is an empty archive frame: `NO STILL LOADED
 - `empty-decoding` shows `READING STILL` / `the archive is decoding` while a load is in flight.
 - `empty-plate` shows `VISOR  no still` (or the current look) with no filename.
 - `empty-thumbs` look cards show the look name, not a live thumb.
-- `empty-open` clicking the theater opens the same picker as `OPEN STILL`.
+- `empty-open` clicking the theater opens the same picker as `CHOOSE STILL`.
 
 ## How to get to it (user POV)
 
@@ -23,7 +23,7 @@ Preconditions:
 - `verify-ascii doctor` is ok.
 - This is not the `sample.png` baseline.
 
-- **Empty frame.** Capture the theater. Run `.cursor/skills/verify-ascii/scripts/verify-ascii screenshot empty-theater`. OCR / the image show `NO STILL LOADED` and `drop a still into the archive`. Central panel is a dark frame with a cream inner stroke, not glyphs.
+- **Empty frame.** Capture the theater. Run `.cursor/skills/verify-ascii/scripts/verify-ascii screenshot empty-theater`. OCR / the image show `NO STILL LOADED` and `drop a photo here, or click to choose`. Central panel is a dark frame with a cream inner stroke, not glyphs.
 - **Plate.** The sidebar plate reads `no still` and has no `sample.png` filename line.
 - **Thumbs.** Look cards show `VISOR` / `BLOCKS` / `CRT` / `ANSI` as labels without a rendered still.
 - **Theater click.** Click the theater. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click theater`. The file picker opens. Cancel with `verify-ascii key Escape`. After cancel, the theater is still `NO STILL LOADED` (not a hang, not a loaded still).

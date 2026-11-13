@@ -46,5 +46,5 @@ Keep implementation details out of the map. Name only user paths, stable handles
 - [Cells and characters](./mark-cells-chars.md) covers `:: MARK` CELLS (mosaic) vs CHARS (glyphs).
 - [Density, invert, knob](./density-invert-knob.md) covers the 16–200 `cols` slider, invert, and the one analog knob the current look uses.
 - [Colour](./colour.md) covers SOURCE / VISOR / AMBER / CREAM, independent of the look.
-- [Export](./export.md) covers TXT, SVG, ANSI, and COPY TXT. PNG/HTML are not in the sidebar.
+- [Export](./export.md) covers TXT, SVG, ANSI, and COPY TXT. Native uses a save dialog; web sends the file to Downloads. PNG/HTML are not in the sidebar.
 - [Empty theater](./empty-theater.md) covers `NO STILL LOADED` when nothing is loaded.

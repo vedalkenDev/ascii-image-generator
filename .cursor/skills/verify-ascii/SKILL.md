@@ -88,7 +88,7 @@ Handles (sidebar, top to bottom):
 | `colour.source` `colour.visor` `colour.amber` `colour.cream` | colour chips |
 | `invert` | `INVERT` / `INVERT ON` |
 | `knob` | analog bar (weight / glow / chroma) |
-| `out.txt` `out.svg` `out.ansi` | export chips (rfd save dialog) |
+| `out.txt` `out.svg` `out.ansi` | export chips (native rfd; web blob download) |
 | `copy.txt` | `COPY TXT` |
 
 Clicks go through `scripts/pointer-click` (wlr-virtual-pointer). Hyprland `send_key_state` / `send_shortcut` with `mouse:272` does **not** reach eframe; do not substitute that. The helper builds the clicker on first `click` (`wayland-scanner` + `cc` + `libwayland-client`).
@@ -127,7 +127,7 @@ Seed fixture: repo `sample.png` (160×100 PNG). Scratch stills for format/cap jo
 
 Kills **only** the PID `launch` recorded, and only if `/proc/$PID/cmdline` contains `ascii-image-generator` and the PID is not foreign. Then deletes the state file. Does **not** delete evidence. Does **not** `pkill ascii-image-generator`. After cleanup, `ls` the evidence directory and require the proof files still exist.
 
-If a drive opened an rfd dialog, send `Escape` before cleanup so the worker is not left in `Opening…` / `Exporting…`.
+If a drive opened a native rfd dialog, send `Escape` before cleanup so the worker is not left in `Opening…`. Web export does not open a dialog.
 
 Failed iterations must also cleanup so foreign PIDs and stray dialogs are not stranded.
 

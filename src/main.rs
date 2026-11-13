@@ -34,11 +34,12 @@ const OPEN_FILTERS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "svg",
 ];
 
+#[allow(dead_code)]
 enum Job {
     Loaded { name: String, img: RgbaImage },
     Failed(String),
     Idle,
-    Saved,
+    Saved(String),
     Busy(&'static str),
 }
 
@@ -220,8 +221,13 @@ impl App {
                     self.error = Some(e);
                     self.busy = None;
                 }
-                Job::Idle | Job::Saved => {
+                Job::Idle => {
                     self.busy = None;
+                }
+                Job::Saved(name) => {
+                    self.busy = None;
+                    self.notice = Some(format!("saved {name}"));
+                    self.error = None;
                 }
                 Job::Busy(s) => {
                     self.busy = Some(s);
@@ -304,20 +310,38 @@ impl App {
             self.error = Some("Load a still first.".into());
             return;
         }
-        self.busy = Some("Exporting…");
         let stem = Path::new(&self.source_name)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("ascii")
             .to_string();
-        spawn_save(
-            self.jobs_tx.clone(),
-            kind,
-            stem,
-            self.cols,
-            self.rows,
-            self.grid.clone(),
-        );
+        let name = format!("{stem}.{}", kind.ext());
+        #[cfg(target_arch = "wasm32")]
+        {
+            match io::encode(kind, self.cols, self.rows, &self.grid) {
+                Ok(bytes) => match web_download(&name, kind.mime(), &bytes) {
+                    Ok(()) => {
+                        self.notice = Some(format!("saved {name}"));
+                        self.error = None;
+                    }
+                    Err(e) => self.error = Some(e),
+                },
+                Err(e) => self.error = Some(e),
+            }
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.busy = Some("Exporting…");
+            spawn_save(
+                self.jobs_tx.clone(),
+                kind,
+                name,
+                self.cols,
+                self.rows,
+                self.grid.clone(),
+            );
+        }
     }
 }
 
@@ -359,11 +383,17 @@ impl eframe::App for App {
                             self.cols,
                             self.rows,
                         );
-                        let open_label = busy.unwrap_or(if self.source.is_none() {
-                            "CHOOSE STILL"
-                        } else {
-                            "CHANGE STILL"
-                        });
+                        let open_label = match busy {
+                            Some("Opening…") => "Opening…",
+                            Some("Decoding…") => "Decoding…",
+                            _ => {
+                                if self.source.is_none() {
+                                    "CHOOSE STILL"
+                                } else {
+                                    "CHANGE STILL"
+                                }
+                            }
+                        };
                         if press_button(ui, open_label, reduced).clicked() {
                             self.open_dialog();
                         }
@@ -997,16 +1027,15 @@ fn spawn_load_bytes(tx: Sender<Job>, name: String, bytes: Vec<u8>) {
     finish_bytes(&tx, name, &bytes);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_save(
     tx: Sender<Job>,
     kind: io::ExportKind,
-    stem: String,
+    name: String,
     cols: u32,
     rows: u32,
     grid: Vec<Cell>,
 ) {
-    let name = format!("{stem}.{}", kind.ext());
-    #[cfg(not(target_arch = "wasm32"))]
     thread::spawn(move || {
         let Some(path) = rfd::FileDialog::new()
             .add_filter(kind.label(), &[kind.ext()])
@@ -1021,7 +1050,7 @@ fn spawn_save(
                 if let Err(e) = std::fs::write(&path, bytes) {
                     let _ = tx.send(Job::Failed(format!("Could not write file: {e}")));
                 } else {
-                    let _ = tx.send(Job::Saved);
+                    let _ = tx.send(Job::Saved(name));
                 }
             }
             Err(e) => {
@@ -1029,30 +1058,30 @@ fn spawn_save(
             }
         }
     });
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_futures::spawn_local(async move {
-        let Some(file) = rfd::AsyncFileDialog::new()
-            .add_filter(kind.label(), &[kind.ext()])
-            .set_file_name(&name)
-            .save_file()
-            .await
-        else {
-            let _ = tx.send(Job::Idle);
-            return;
-        };
-        match io::encode(kind, cols, rows, &grid) {
-            Ok(bytes) => {
-                if file.write(&bytes).await.is_err() {
-                    let _ = tx.send(Job::Failed("Could not write file.".into()));
-                } else {
-                    let _ = tx.send(Job::Saved);
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(Job::Failed(e));
-            }
-        }
-    });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_download(name: &str, mime: &str, bytes: &[u8]) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let document = window.document().ok_or_else(|| "no document".to_string())?;
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::of1(&array);
+    let props = web_sys::BlobPropertyBag::new();
+    props.set_type(mime);
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &props)
+        .map_err(|_| "Could not prepare the download.".to_string())?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)
+        .map_err(|_| "Could not prepare the download.".to_string())?;
+    let a = document
+        .create_element("a")
+        .map_err(|_| "Could not start the download.".to_string())?
+        .dyn_into::<web_sys::HtmlAnchorElement>()
+        .map_err(|_| "Could not start the download.".to_string())?;
+    a.set_href(&url);
+    a.set_download(name);
+    a.click();
+    let _ = web_sys::Url::revoke_object_url(&url);
+    Ok(())
 }
 
 fn archive_plate(

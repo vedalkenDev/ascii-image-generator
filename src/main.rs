@@ -302,6 +302,15 @@ impl App {
         self.error = None;
     }
 
+    fn export_grid(&self, kind: io::ExportKind) -> (u32, u32, Vec<Cell>) {
+        if kind == io::ExportKind::Svg {
+            if let Some(img) = &self.source {
+                return io::convert_for_svg(img, &self.settings);
+            }
+        }
+        (self.cols, self.rows, self.grid.clone())
+    }
+
     fn save_export(&mut self, kind: io::ExportKind) {
         if self.busy.is_some() {
             return;
@@ -316,9 +325,11 @@ impl App {
             .unwrap_or("ascii")
             .to_string();
         let name = format!("{stem}.{}", kind.ext());
+        let (cols, rows, grid) = self.export_grid(kind);
+        let mark = self.settings.mark;
         #[cfg(target_arch = "wasm32")]
         {
-            match io::encode(kind, self.cols, self.rows, &self.grid) {
+            match io::encode(kind, cols, rows, &grid, mark) {
                 Ok(bytes) => match web_download(&name, kind.mime(), &bytes) {
                     Ok(()) => {
                         self.notice = Some(format!("saved {name}"));
@@ -337,9 +348,10 @@ impl App {
                 self.jobs_tx.clone(),
                 kind,
                 name,
-                self.cols,
-                self.rows,
-                self.grid.clone(),
+                cols,
+                rows,
+                grid,
+                mark,
             );
         }
     }
@@ -1035,6 +1047,7 @@ fn spawn_save(
     cols: u32,
     rows: u32,
     grid: Vec<Cell>,
+    mark: Mark,
 ) {
     thread::spawn(move || {
         let Some(path) = rfd::FileDialog::new()
@@ -1045,7 +1058,7 @@ fn spawn_save(
             let _ = tx.send(Job::Idle);
             return;
         };
-        match io::encode(kind, cols, rows, &grid) {
+        match io::encode(kind, cols, rows, &grid, mark) {
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(&path, bytes) {
                     let _ = tx.send(Job::Failed(format!("Could not write file: {e}")));

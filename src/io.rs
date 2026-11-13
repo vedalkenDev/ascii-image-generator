@@ -5,10 +5,12 @@ use std::path::Path;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, RgbaImage};
 use resvg::{tiny_skia, usvg};
 
-use crate::ascii::Cell;
+use crate::ascii::{Cell, Mark, Settings};
 
 /// Longest side kept in memory and on the GPU. Bigger stills are downscaled.
 pub const MAX_SIDE: u32 = 2048;
+/// SVG export reconverts at this column cap so Figma is not handed tens of thousands of nodes.
+pub const SVG_MAX_COLS: u32 = 80;
 /// Refuse an in-process full decode above this (RGBA would exceed ~64 MiB).
 const MAX_DECODE_PIXELS: u64 = 16 * 1024 * 1024;
 
@@ -237,29 +239,118 @@ pub fn to_txt(cols: u32, rows: u32, grid: &[Cell]) -> String {
     out
 }
 
-pub fn to_svg(cols: u32, rows: u32, grid: &[Cell]) -> String {
-    let cw = 8.0_f32;
-    let ch = 16.0_f32;
-    let w = cols as f32 * cw;
-    let h = rows as f32 * ch;
-    let mut out = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" font-family=\"monospace\" font-size=\"16\">\n\
-         <rect width=\"100%\" height=\"100%\" fill=\"#050508\"/>\n"
-    );
+pub fn convert_for_svg(img: &RgbaImage, settings: &Settings) -> (u32, u32, Vec<Cell>) {
+    let mut s = *settings;
+    if s.cols > SVG_MAX_COLS {
+        s.cols = SVG_MAX_COLS;
+    }
+    crate::ascii::convert(img, &s)
+}
+
+pub fn to_svg(cols: u32, rows: u32, grid: &[Cell], mark: Mark) -> String {
+    match mark {
+        Mark::Cells => svg_rects(cols, rows, grid, 8, 8),
+        Mark::Chars => svg_text_rows(cols, rows, grid),
+    }
+}
+
+fn svg_rgb(c: [u8; 3]) -> [u8; 3] {
+    c.map(|v| v & 0xf0)
+}
+
+fn fill_attr(c: [u8; 3]) -> String {
+    let c = svg_rgb(c);
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
+fn svg_open(w: u32, h: u32) -> String {
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">\n\
+         <rect width=\"{w}\" height=\"{h}\" fill=\"#050508\"/>\n"
+    )
+}
+
+fn svg_rects(cols: u32, rows: u32, grid: &[Cell], cw: u32, ch: u32) -> String {
+    let w = cols * cw;
+    let h = rows * ch;
+    let mut out = svg_open(w, h);
     for y in 0..rows {
         let row = (y * cols) as usize;
-        for x in 0..cols {
+        let mut x = 0u32;
+        while x < cols {
             let cell = grid[row + x as usize];
-            let fill = format!("#{:02x}{:02x}{:02x}", cell.color[0], cell.color[1], cell.color[2]);
-            let glyph = xml_escape(cell.ch);
-            let px = x as f32 * cw;
-            let py = (y as f32 + 0.85) * ch;
+            if cell.ch == ' ' {
+                x += 1;
+                continue;
+            }
+            let color = svg_rgb(cell.color);
+            let mut n = 1u32;
+            while x + n < cols {
+                let next = grid[row + (x + n) as usize];
+                if next.ch == ' ' || svg_rgb(next.color) != color {
+                    break;
+                }
+                n += 1;
+            }
+            let px = x * cw;
+            let py = y * ch;
+            let rw = n * cw;
+            let fill = fill_attr(cell.color);
             out.push_str(&format!(
-                "<text x=\"{px}\" y=\"{py}\" fill=\"{fill}\">{glyph}</text>\n"
+                "<rect x=\"{px}\" y=\"{py}\" width=\"{rw}\" height=\"{ch}\" fill=\"{fill}\"/>\n"
             ));
+            x += n;
         }
     }
     out.push_str("</svg>\n");
+    out
+}
+
+fn svg_text_rows(cols: u32, rows: u32, grid: &[Cell]) -> String {
+    const CW: u32 = 8;
+    const CH: u32 = 16;
+    let w = cols * CW;
+    let h = rows * CH;
+    let mut out = svg_open(w, h);
+    out.push_str(&format!(
+        "<g font-family=\"ui-monospace, monospace\" font-size=\"{CH}\">\n"
+    ));
+    for y in 0..rows {
+        let row = (y * cols) as usize;
+        let py = (y + 1) * CH - 2;
+        let mut line = format!("<text y=\"{py}\" xml:space=\"preserve\">");
+        let mut x = 0u32;
+        let mut wrote = false;
+        while x < cols {
+            let cell = grid[row + x as usize];
+            if cell.ch == ' ' {
+                x += 1;
+                continue;
+            }
+            let color = svg_rgb(cell.color);
+            let mut run = String::new();
+            run.push_str(&xml_escape(cell.ch));
+            let mut n = 1u32;
+            while x + n < cols {
+                let next = grid[row + (x + n) as usize];
+                if next.ch == ' ' || svg_rgb(next.color) != color {
+                    break;
+                }
+                run.push_str(&xml_escape(next.ch));
+                n += 1;
+            }
+            let px = x * CW;
+            let fill = fill_attr(cell.color);
+            line.push_str(&format!("<tspan x=\"{px}\" fill=\"{fill}\">{run}</tspan>"));
+            wrote = true;
+            x += n;
+        }
+        if wrote {
+            line.push_str("</text>\n");
+            out.push_str(&line);
+        }
+    }
+    out.push_str("</g>\n</svg>\n");
     out
 }
 
@@ -336,10 +427,16 @@ fn png_mosaic(cols: u32, rows: u32, grid: &[Cell]) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
-pub fn encode(kind: ExportKind, cols: u32, rows: u32, grid: &[Cell]) -> Result<Vec<u8>, String> {
+pub fn encode(
+    kind: ExportKind,
+    cols: u32,
+    rows: u32,
+    grid: &[Cell],
+    mark: Mark,
+) -> Result<Vec<u8>, String> {
     match kind {
         ExportKind::Txt => Ok(to_txt(cols, rows, grid).into_bytes()),
-        ExportKind::Svg => Ok(to_svg(cols, rows, grid).into_bytes()),
+        ExportKind::Svg => Ok(to_svg(cols, rows, grid, mark).into_bytes()),
         ExportKind::Html => Ok(to_html(cols, rows, grid).into_bytes()),
         ExportKind::Ansi => Ok(to_ansi(cols, rows, grid).into_bytes()),
         ExportKind::Png => to_png(cols, rows, grid),
@@ -422,11 +519,35 @@ mod tests {
     #[test]
     fn export_svg_has_glyphs() {
         let (cols, rows, grid) = sample_grid();
-        let svg = to_svg(cols, rows, &grid);
-        assert!(svg.contains("<svg"));
-        assert!(svg.contains("█"));
-        assert!(svg.contains("fill="));
-        let _ = (cols, rows);
+        let cells = to_svg(cols, rows, &grid, Mark::Cells);
+        assert!(cells.contains("<svg"));
+        assert!(cells.contains("<rect"));
+        assert!(cells.contains("fill="));
+        assert!(!cells.contains("<text"));
+
+        let mut s = crate::ascii::Settings::default();
+        s.cols = 8;
+        s.charset = crate::ascii::Charset::Blocks;
+        s.mark = Mark::Chars;
+        let img = RgbaImage::from_pixel(40, 20, image::Rgba([255, 255, 255, 255]));
+        let (cols, rows, grid) = crate::ascii::convert(&img, &s);
+        let chars = to_svg(cols, rows, &grid, Mark::Chars);
+        assert!(chars.contains("█"));
+        assert!(chars.contains("<tspan"));
+        assert!(!chars.contains("<text x="));
+    }
+
+    #[test]
+    fn svg_merges_same_fill_runs() {
+        let cell = Cell {
+            ch: '█',
+            color: [0x59, 0x2a, 0xa4],
+        };
+        let grid = vec![cell; 8];
+        let svg = to_svg(8, 1, &grid, Mark::Cells);
+        let rects = svg.matches("<rect").count();
+        assert_eq!(rects, 2, "ground + one merged run, got {svg}");
+        assert!(svg.contains("width=\"64\""), "{svg}");
     }
 
     #[test]
@@ -490,7 +611,7 @@ mod tests {
             ExportKind::Html,
             ExportKind::Ansi,
         ] {
-            let bytes = encode(kind, cols, rows, &grid).expect(kind.label());
+            let bytes = encode(kind, cols, rows, &grid, s.mark).expect(kind.label());
             let path = dest.join(format!("export-sample.{}", kind.ext()));
             std::fs::write(&path, bytes).unwrap();
             assert!(path.metadata().unwrap().len() > 0);
@@ -510,6 +631,52 @@ mod tests {
         assert!(img.width() <= MAX_SIDE);
         assert!(img.height() <= MAX_SIDE);
         assert_eq!(img.width(), 2048);
+    }
+
+    fn phone_still() -> RgbaImage {
+        let mut img = RgbaImage::new(1080, 1920);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let t = y as f32 / 1919.0;
+            let s = x as f32 / 1079.0;
+            p.0 = [
+                (40.0 + 180.0 * t) as u8,
+                (80.0 + 100.0 * s) as u8,
+                (200.0 - 120.0 * t) as u8,
+                255,
+            ];
+        }
+        img
+    }
+
+    #[test]
+    fn svg_phone_photo_at_density_200_is_figma_light() {
+        let img = phone_still();
+        let mut s = crate::ascii::Settings::default();
+        s.cols = 200;
+        crate::ascii::Look::Visor.apply(&mut s);
+        s.mark = crate::ascii::Mark::Cells;
+        s.color_kind = crate::ascii::ColorKind::Visor;
+        let (cols, rows, grid) = convert_for_svg(&img, &s);
+        let svg = to_svg(cols, rows, &grid, s.mark);
+        let bytes = svg.len();
+        let texts = svg.matches("<text").count();
+        let rects = svg.matches("<rect").count();
+        eprintln!(
+            "SVG measure: {cols}×{rows} cells={} bytes={bytes} ({:.2} MB) texts={texts} rects={rects}",
+            cols * rows,
+            bytes as f64 / (1024.0 * 1024.0),
+        );
+        assert_eq!(cols, SVG_MAX_COLS);
+        assert!(
+            bytes < 400_000,
+            "SVG too heavy for Figma: {bytes} bytes ({:.2} MB) at {cols}×{rows}",
+            bytes as f64 / (1024.0 * 1024.0)
+        );
+        assert!(
+            rects < 5_000,
+            "too many SVG nodes for Figma: {rects} rects at {cols}×{rows}"
+        );
+        assert_eq!(texts, 0);
     }
 
     #[test]

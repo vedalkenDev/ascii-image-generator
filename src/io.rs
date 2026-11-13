@@ -1,5 +1,9 @@
-use std::io::{Cursor, Write};
+use std::io::Cursor;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::{Command, Stdio};
 
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, RgbaImage};
@@ -22,6 +26,7 @@ pub fn downscale_max_side(img: RgbaImage, max_side: u32) -> RgbaImage {
     image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_path(path: &Path) -> Result<RgbaImage, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("Could not read file: {e}"))?;
     load_bytes(&bytes)
@@ -139,6 +144,12 @@ fn apply_jpeg_orientation(bytes: &[u8], img: &mut RgbaImage) {
     *img = dynimg.to_rgba8();
 }
 
+#[cfg(target_arch = "wasm32")]
+fn magick_downscale(_bytes: &[u8]) -> Result<RgbaImage, String> {
+    Err("no magick".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn magick_downscale(bytes: &[u8]) -> Result<RgbaImage, String> {
     let mut child = Command::new("magick")
         .args([
@@ -289,6 +300,12 @@ pub fn to_png(cols: u32, rows: u32, grid: &[Cell]) -> Result<Vec<u8>, String> {
     png_mosaic(cols, rows, grid)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn magick_svg_png(_svg: &[u8]) -> Result<Vec<u8>, String> {
+    Err("no magick".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn magick_svg_png(svg: &[u8]) -> Result<Vec<u8>, String> {
     let mut child = Command::new("magick")
         .args(["svg:-", "png:-"])

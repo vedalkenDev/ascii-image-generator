@@ -11,6 +11,8 @@ Built installers live on the [v0.1.0 release](https://github.com/vedalkenDev/asc
 - [Windows x64 `.exe`](https://github.com/vedalkenDev/ascii-image-generator/releases/download/v0.1.0/Cosmic-Archive-ASCII-windows-x64.exe)
 - [macOS `.dmg`](https://github.com/vedalkenDev/ascii-image-generator/releases/download/v0.1.0/Cosmic-Archive-ASCII-macos.dmg) (Intel and Apple Silicon)
 
+A **web** build of the same app (WebAssembly, same looks catalog) is in this repo and avoids the Gatekeeper dialog. SVG import still needs ImageMagick on the desktop build only. A GitHub Pages workflow ships with the repo; it is not a live public URL until Pages is turned on.
+
 The Windows build is a single unsigned exe. The macOS disk image is **unsigned and not notarized**, so current macOS will show **“Cosmic Archive ASCII.app Not Opened”** / Apple could not verify it. That is Gatekeeper, not a broken app.
 
 To open it:
@@ -49,6 +51,8 @@ git clone https://github.com/vedalkenDev/ascii-image-generator.git
 cd ascii-image-generator
 cargo run --release
 ```
+
+The web target is the same crate. `trunk build --release` writes `dist/`.
 
 Open a still from the sidebar, or pass a path:
 

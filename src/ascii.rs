@@ -93,6 +93,7 @@ impl Look {
             }
             Self::Ansi => {
                 s.contrast = 1.0;
+                s.saturation = 1.0;
                 s.brightness = 0.0;
             }
         }
@@ -307,5 +308,17 @@ mod tests {
         Look::Crt.apply(&mut crt);
         let (_, _, cells) = convert(&img, &crt);
         assert!(cells.iter().all(|c| c.color[0] >= c.color[2]));
+    }
+
+    #[test]
+    fn ansi_after_crt_restores_chroma() {
+        let img = RgbaImage::from_pixel(40, 40, image::Rgba([255, 0, 0, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        Look::Crt.apply(&mut s);
+        Look::Ansi.apply(&mut s);
+        assert!((s.saturation - 1.0).abs() < f32::EPSILON);
+        let (_, _, cells) = convert(&img, &s);
+        assert!(cells.iter().any(|c| c.color[0] > c.color[1] && c.color[0] > c.color[2]));
     }
 }

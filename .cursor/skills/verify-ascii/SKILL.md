@@ -2,7 +2,7 @@
 name: verify-ascii
 description: >-
   Drive the Cosmic Archive — ASCII eframe desktop app the way a user does:
-  launch an isolated native window, apply looks, density, invert, and export.
+  launch an isolated native window, apply looks, density, colour, invert, and export.
   Use when verifying Cosmic Archive ASCII, ascii-image-generator, stills
   conversion, looks catalog, or sidebar export — not unit tests alone.
 ---
@@ -43,7 +43,7 @@ Ready means all of:
 - A Hyprland client exists with that PID and title `Cosmic Archive — ASCII`.
 - With a still: theater is not `NO STILL LOADED` / `READING STILL`. With `--empty`: theater reads `NO STILL LOADED`.
 
-Launch focuses workspace 5 (`hyprctl dispatch 'o.workspaces.focus(5)'`), floats **only** the new PID, and resizes it to 1100×680 so chrome handles stay stable. A Cosmic Archive window already on workspace 5 is foreign: record its PID, never click it, never kill it.
+Launch focuses workspace 5 (`hyprctl dispatch 'o.workspaces.focus(5)'`), floats **only** the new PID, and resizes it to 1100×820 so chrome handles stay stable (colour chips sit above invert). A Cosmic Archive window already on workspace 5 is foreign: record its PID, never click it, never kill it.
 
 Teardown is Cleanup below. State lives in `$ASCII_VERIFY_DIR` (default `/tmp/ascii-verify-$USER/state.json`).
 
@@ -83,7 +83,9 @@ Handles (sidebar, top to bottom):
 | `theater` | central panel (empty-state click also opens the picker) |
 | `look.visor` `look.blocks` `look.crt` `look.ansi` | look cards |
 | `mark.cells` `mark.chars` | mosaic cells vs character glyphs |
-| `density.32` `density.80` `density.132` | density chips |
+| `density.32` `density.80` `density.132` | positions along the `cols` slider |
+| `density` | 80% along the `cols` bar |
+| `colour.source` `colour.visor` `colour.amber` `colour.cream` | colour chips |
 | `invert` | `INVERT` / `INVERT ON` |
 | `knob` | analog bar (weight / glow / chroma) |
 | `out.txt` `out.svg` `out.ansi` | export chips (rfd save dialog) |

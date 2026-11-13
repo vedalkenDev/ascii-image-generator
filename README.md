@@ -40,7 +40,7 @@ The sidebar is a catalog of the loaded still, not a settings form.
 | **CRT** | Amber phosphor punctuation, terminal-style |
 | **ANSI** | Letter and number glyphs in the still’s colour |
 
-Each look keeps **CELLS** (square mosaic) or **CHARS** (glyphs), density **32 / 80 / 132**, invert, and one knob that look actually uses (weight, glow, or chroma). CELLS is the default.
+Each look keeps **CELLS** (square mosaic) or **CHARS** (glyphs), a density slider (**16–200** columns, default **80**), colour (**SOURCE** / **VISOR** / **AMBER** / **CREAM**), invert, and one knob that look actually uses (weight, glow, or chroma). CELLS is the default. Colour stays put when you switch looks.
 
 ## Run on Linux
 
@@ -60,7 +60,7 @@ Open a still from the sidebar, or pass a path:
 cargo run --release -- sample.png
 ```
 
-Drop PNG, JPEG, WebP, GIF, BMP, TIFF, or SVG onto the window.
+Drop PNG, JPEG, WebP, GIF, BMP, TIFF, or SVG onto the window. On the web build you can also drag a photo in from another tab (Pinterest, a news site, a gallery). The archive reads the image file when the browser supplies one; otherwise it fetches the image URL. If that site blocks the fetch, save the photo and use **CHOOSE STILL**.
 
 There is no ImageMagick. The exe, the dmg, and the wasm build do not call `magick` and do not need it on `PATH`.
 

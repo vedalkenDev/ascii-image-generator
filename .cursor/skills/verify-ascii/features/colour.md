@@ -8,12 +8,12 @@
 - `colour-visor` is the default ramp.
 - `colour-amber` is phosphor amber.
 - `colour-cream` walks ground to cream `#F4F3E8`.
-- `colour-duo` maps black to INK and white to PAPER; INK/PAPER cycle visor swatches.
+- `colour-duo` maps black to INK and white to PAPER; INK/PAPER are RGB pickers.
 - `colour-keeps` stays on the chosen chip after applying another look.
 
 ## How to get to it (user POV)
 
-- Choose `SOURCE`, `VISOR`, `AMBER`, `CREAM`, or `DUO` under `:: COLOUR`. On DUO, click `INK` / `PAPER` to cycle swatches.
+- Choose `SOURCE`, `VISOR`, `AMBER`, `CREAM`, or `DUO` under `:: COLOUR`. On DUO, click the INK / PAPER swatches to open RGB pickers.
 
 ## Driving it with verify-ascii
 
@@ -27,9 +27,9 @@ Preconditions:
 - **Source.** Run `click colour.source` then `screenshot colour-source`. Chip `SOURCE` is selected. Theater uses the still's colours (rainbow bands on `sample.png`). Screenshots differ from `colour-visor`.
 - **Amber.** Run `click colour.amber` then `screenshot colour-amber`. Chip `AMBER` is selected. Theater is phosphor amber, not visor teal.
 - **Cream.** Run `click colour.cream` then `screenshot colour-cream`. Chip `CREAM` is selected. Occupied cells are cream on ground.
-- **Duo.** Run `click colour.duo` then `screenshot colour-duo`. Chip `DUO` is selected. Theater is charcoal-to-cream luma, not visor teal. `INK` / `PAPER` chips are visible.
+- **Duo.** Run `click colour.duo` then `screenshot colour-duo`. Chip `DUO` is selected. Theater is charcoal-to-cream luma, not visor teal. `INK` / `PAPER` RGB pickers are visible.
 - **Keeps after look.** On Duo, apply Blocks. Run `click look.blocks` then `screenshot colour-keeps`. Chip `DUO` is still selected. Theater stays duotone, with Blocks marks.
-- **Extra evidence (not a substitute).** `cream_maps_white_to_cream` and `source_keeps_still_colour` via `verify-ascii cargo-tests`.
+- **Extra evidence (not a substitute).** `cream_maps_white_to_cream`, `source_keeps_still_colour`, `duotone_maps_black_to_ink_white_to_paper`, and `duotone_accepts_arbitrary_rgb` via `verify-ascii cargo-tests`.
 
 ## Gotchas
 

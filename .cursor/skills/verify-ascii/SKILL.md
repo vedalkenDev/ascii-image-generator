@@ -86,7 +86,7 @@ Handles (sidebar, top to bottom):
 | `density.32` `density.80` `density.132` | positions along the `cols` slider |
 | `density` | 80% along the `cols` bar |
 | `colour.source` `colour.visor` `colour.amber` `colour.cream` `colour.duo` | colour chips |
-| `colour.ink` `colour.paper` | DUO ink/paper swatch cycle |
+| `colour.ink` `colour.paper` | DUO ink/paper RGB pickers |
 | `invert` | `INVERT` / `INVERT ON` |
 | `knob` | analog bar (weight / glow / chroma) |
 | `out.vector` `out.raster` | VECTOR vs RASTER family |

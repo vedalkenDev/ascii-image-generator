@@ -5,12 +5,13 @@ use std::path::Path;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, RgbaImage};
 use resvg::{tiny_skia, usvg};
 
-use crate::ascii::{Cell, Mark, Settings};
+use crate::ascii::{Cell, Mark};
 
 /// Longest side kept in memory and on the GPU. Bigger stills are downscaled.
 pub const MAX_SIDE: u32 = 2048;
-/// SVG export reconverts at this column cap so Figma is not handed tens of thousands of nodes.
-pub const SVG_MAX_COLS: u32 = 80;
+/// Raster/SVG long side. Same grid as the theater; cell size grows so 32-col
+/// stills are not 8px stamps and 400-col stills are not hairline gaps.
+const EXPORT_SIDE: u32 = 1600;
 /// Refuse an in-process full decode above this (RGBA would exceed ~64 MiB).
 const MAX_DECODE_PIXELS: u64 = 16 * 1024 * 1024;
 
@@ -246,27 +247,30 @@ pub fn to_txt(cols: u32, rows: u32, grid: &[Cell]) -> String {
     out
 }
 
-pub fn convert_for_svg(img: &RgbaImage, settings: &Settings) -> (u32, u32, Vec<Cell>) {
-    let mut s = *settings;
-    if s.cols > SVG_MAX_COLS {
-        s.cols = SVG_MAX_COLS;
+pub fn cell_px(cols: u32, rows: u32, mark: Mark) -> (u32, u32) {
+    let cols = cols.max(1);
+    let _rows = rows.max(1);
+    match mark {
+        Mark::Cells => {
+            let cw = EXPORT_SIDE.div_ceil(cols).max(1);
+            (cw, cw)
+        }
+        Mark::Chars => {
+            let cw = EXPORT_SIDE.div_ceil(cols).max(1);
+            (cw, (cw as f32 / crate::ascii::CHAR_ASPECT).round().max(1.0) as u32)
+        }
     }
-    crate::ascii::convert(img, &s)
 }
 
 pub fn to_svg(cols: u32, rows: u32, grid: &[Cell], mark: Mark) -> String {
+    let (cw, ch) = cell_px(cols, rows, mark);
     match mark {
-        Mark::Cells => svg_rects(cols, rows, grid, 8, 8),
-        Mark::Chars => svg_text_rows(cols, rows, grid),
+        Mark::Cells => svg_rects(cols, rows, grid, cw, ch),
+        Mark::Chars => svg_text_rows(cols, rows, grid, cw, ch),
     }
 }
 
-fn svg_rgb(c: [u8; 3]) -> [u8; 3] {
-    c.map(|v| v & 0xf0)
-}
-
 fn fill_attr(c: [u8; 3]) -> String {
-    let c = svg_rgb(c);
     format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
@@ -290,11 +294,11 @@ fn svg_rects(cols: u32, rows: u32, grid: &[Cell], cw: u32, ch: u32) -> String {
                 x += 1;
                 continue;
             }
-            let color = svg_rgb(cell.color);
+            let color = cell.color;
             let mut n = 1u32;
             while x + n < cols {
                 let next = grid[row + (x + n) as usize];
-                if next.ch == ' ' || svg_rgb(next.color) != color {
+                if next.ch == ' ' || next.color != color {
                     break;
                 }
                 n += 1;
@@ -313,44 +317,31 @@ fn svg_rects(cols: u32, rows: u32, grid: &[Cell], cw: u32, ch: u32) -> String {
     out
 }
 
-fn svg_text_rows(cols: u32, rows: u32, grid: &[Cell]) -> String {
-    const CW: u32 = 8;
-    const CH: u32 = 16;
-    let w = cols * CW;
-    let h = rows * CH;
+fn svg_text_rows(cols: u32, rows: u32, grid: &[Cell], cw: u32, ch: u32) -> String {
+    let w = cols * cw;
+    let h = rows * ch;
+    let fs = ((cw as f32 / crate::ascii::MONO_ADVANCE).min(ch as f32)).max(1.0);
     let mut out = svg_open(w, h);
     out.push_str(&format!(
-        "<g font-family=\"ui-monospace, monospace\" font-size=\"{CH}\">\n"
+        "<g font-family=\"Noto Sans Mono, ui-monospace, monospace\" font-size=\"{fs:.3}\">\n"
     ));
     for y in 0..rows {
         let row = (y * cols) as usize;
-        let py = (y + 1) * CH - 2;
-        let mut line = format!("<text y=\"{py}\" xml:space=\"preserve\">");
-        let mut x = 0u32;
+        let py = (y as f32 + 1.0) * ch as f32 - ch as f32 * 0.12;
+        let mut line = format!("<text y=\"{py:.2}\" xml:space=\"preserve\">");
         let mut wrote = false;
-        while x < cols {
+        for x in 0..cols {
             let cell = grid[row + x as usize];
             if cell.ch == ' ' {
-                x += 1;
                 continue;
             }
-            let color = svg_rgb(cell.color);
-            let mut run = String::new();
-            run.push_str(&xml_escape(cell.ch));
-            let mut n = 1u32;
-            while x + n < cols {
-                let next = grid[row + (x + n) as usize];
-                if next.ch == ' ' || svg_rgb(next.color) != color {
-                    break;
-                }
-                run.push_str(&xml_escape(next.ch));
-                n += 1;
-            }
-            let px = x * CW;
+            let px = x * cw;
             let fill = fill_attr(cell.color);
-            line.push_str(&format!("<tspan x=\"{px}\" fill=\"{fill}\">{run}</tspan>"));
+            line.push_str(&format!(
+                "<tspan x=\"{px}\" fill=\"{fill}\">{}</tspan>",
+                xml_escape(cell.ch)
+            ));
             wrote = true;
-            x += n;
         }
         if wrote {
             line.push_str("</text>\n");
@@ -406,10 +397,15 @@ pub fn to_ansi(cols: u32, rows: u32, grid: &[Cell]) -> String {
 }
 
 pub fn mosaic_rgba(cols: u32, rows: u32, grid: &[Cell], mark: Mark) -> RgbaImage {
-    let (cw, ch) = match mark {
-        Mark::Cells => (8u32, 8u32),
-        Mark::Chars => (8u32, 16u32),
-    };
+    match mark {
+        Mark::Chars => rasterize_export_svg(cols, rows, grid, mark)
+            .unwrap_or_else(|_| mosaic_cells(cols, rows, grid, mark)),
+        Mark::Cells => mosaic_cells(cols, rows, grid, mark),
+    }
+}
+
+pub(crate) fn mosaic_cells(cols: u32, rows: u32, grid: &[Cell], mark: Mark) -> RgbaImage {
+    let (cw, ch) = cell_px(cols, rows, mark);
     let mut img = RgbaImage::from_pixel(cols * cw, rows * ch, image::Rgba([0x05, 0x05, 0x08, 255]));
     for y in 0..rows {
         for x in 0..cols {
@@ -442,11 +438,61 @@ fn encode_mosaic(
     format: ImageFormat,
 ) -> Result<Vec<u8>, String> {
     let img = mosaic_rgba(cols, rows, grid, mark);
+    encode_image(img, format)
+}
+
+fn encode_image(img: RgbaImage, format: ImageFormat) -> Result<Vec<u8>, String> {
     let mut buf = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(img)
-        .write_to(&mut buf, format)
-        .map_err(|e| e.to_string())?;
+    match format {
+        ImageFormat::Jpeg => {
+            let rgb = DynamicImage::ImageRgba8(img).to_rgb8();
+            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 92);
+            enc.encode(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        other => {
+            DynamicImage::ImageRgba8(img)
+                .write_to(&mut buf, other)
+                .map_err(|e| e.to_string())?;
+        }
+    }
     Ok(buf.into_inner())
+}
+
+fn rasterize_export_svg(
+    cols: u32,
+    rows: u32,
+    grid: &[Cell],
+    mark: Mark,
+) -> Result<RgbaImage, String> {
+    let svg = to_svg(cols, rows, grid, mark);
+    let mut opt = usvg::Options::default();
+    if let Some(bytes) = mono_font_bytes() {
+        opt.fontdb_mut().load_font_data(bytes);
+        opt.fontdb_mut().set_monospace_family("Noto Sans Mono");
+        opt.fontdb_mut().set_sans_serif_family("Noto Sans Mono");
+    }
+    let tree = usvg::Tree::from_data(svg.as_bytes(), &opt)
+        .map_err(|e| format!("Could not render export: {e}"))?;
+    let size = tree.size().to_int_size();
+    let w = size.width();
+    let h = size.height();
+    if w == 0 || h == 0 {
+        return Err("Could not render export.".into());
+    }
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or("Could not render export.")?;
+    pixmap.fill(tiny_skia::Color::from_rgba8(0x05, 0x05, 0x08, 255));
+    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    pixmap_to_rgba(pixmap)
+}
+
+pub fn mono_font_bytes() -> Option<Vec<u8>> {
+    Some(include_bytes!("../assets/NotoSansMono-Regular.ttf").to_vec())
 }
 
 pub fn encode(
@@ -571,7 +617,12 @@ mod tests {
         let svg = to_svg(8, 1, &grid, Mark::Cells);
         let rects = svg.matches("<rect").count();
         assert_eq!(rects, 2, "ground + one merged run, got {svg}");
-        assert!(svg.contains("width=\"64\""), "{svg}");
+        let (cw, _) = cell_px(8, 1, Mark::Cells);
+        assert!(
+            svg.contains(&format!("width=\"{}\"", cw * 8)),
+            "{svg}"
+        );
+        assert!(svg.contains("#592aa4"), "{svg}");
     }
 
     #[test]
@@ -621,6 +672,231 @@ mod tests {
         assert_eq!(&jpg[..2], &[0xff, 0xd8]);
         let webp = encode(ExportKind::Webp, cols, rows, &grid, Mark::Cells).expect("webp");
         assert_eq!(&webp[..4], b"RIFF");
+    }
+
+    #[test]
+    fn write_pipeline_proofs_if_asked() {
+        let Ok(root) = std::env::var("ASCII_EVIDENCE") else {
+            return;
+        };
+        let root = Path::new(&root);
+        let hatch = root.join("hatching");
+        let export = root.join("export-match");
+        let looks = root.join("looks");
+        std::fs::create_dir_all(&hatch).unwrap();
+        std::fs::create_dir_all(&export).unwrap();
+        std::fs::create_dir_all(&looks).unwrap();
+
+        let still = Path::new("/cursor/stores/bc-af75a5c8-0b95-4049-b2af-9d16f70c2afa/media/ascii-before-eagle.jpg");
+        let img = if still.exists() {
+            load_path(still).expect("eagle")
+        } else {
+            load_path(&Path::new(env!("CARGO_MANIFEST_DIR")).join("sample.png")).expect("sample")
+        };
+
+        let mut s = crate::ascii::Settings::default();
+        s.cols = 320;
+        crate::ascii::Look::Visor.apply(&mut s);
+        s.mark = Mark::Cells;
+        let (cols, rows, grid) = crate::ascii::convert(&img, &s);
+
+        let export_cells = mosaic_cells(cols, rows, &grid, Mark::Cells);
+        export_cells.save(export.join("fixed-png.png")).unwrap();
+        preview_inset(&grid, cols, rows, 800, 0.4)
+            .save(hatch.join("cells-320-before.png"))
+            .unwrap();
+        preview_abut(&grid, cols, rows, 800)
+            .save(hatch.join("cells-320-after.png"))
+            .unwrap();
+        old_mosaic(&grid, cols, rows, Mark::Cells)
+            .save(export.join("bad-8px.png"))
+            .unwrap();
+        std::fs::write(export.join("fixed.svg"), to_svg(cols, rows, &grid, Mark::Cells)).unwrap();
+        export_cells
+            .save(export.join("preview-cells-320.png"))
+            .unwrap();
+        let mut s80 = s;
+        s80.cols = 80;
+        s80.mark = Mark::Cells;
+        let (c80, r80, g80) = crate::ascii::convert(&img, &s80);
+        std::fs::write(
+            export.join("bad-4bit-80col.svg"),
+            old_svg_4bit(&g80, c80, r80, Mark::Cells),
+        )
+        .unwrap();
+        mosaic_cells(c80, r80, &g80, Mark::Cells)
+            .save(export.join("preview-cells-80.png"))
+            .unwrap();
+
+        s.mark = Mark::Chars;
+        let (ccols, crows, cgrid) = crate::ascii::convert(&img, &s);
+        chars_overlap_preview(&cgrid, ccols, crows, 800)
+            .save(hatch.join("chars-320-before.png"))
+            .unwrap();
+        mosaic_rgba(ccols, crows, &cgrid, Mark::Chars)
+            .save(hatch.join("chars-320-after.png"))
+            .unwrap();
+        mosaic_rgba(ccols, crows, &cgrid, Mark::Chars)
+            .save(export.join("fixed-chars-png.png"))
+            .unwrap();
+        old_mosaic(&cgrid, ccols, crows, Mark::Chars)
+            .save(export.join("bad-chars-rects.png"))
+            .unwrap();
+
+        s.cols = 80;
+        s.mark = Mark::Cells;
+        for look in crate::ascii::Look::ALL {
+            look.apply(&mut s);
+            s.mark = Mark::Cells;
+            let (lc, lr, lg) = crate::ascii::convert(&img, &s);
+            mosaic_cells(lc, lr, &lg, Mark::Cells)
+                .save(looks.join(format!("{}.png", look.name().to_ascii_lowercase())))
+                .unwrap();
+        }
+    }
+
+    fn preview_canvas(cols: u32, rows: u32, side: u32) -> (u32, u32, f32, f32) {
+        let aspect = cols as f32 / rows.max(1) as f32;
+        let (w, h) = if aspect >= 1.0 {
+            (side, (side as f32 / aspect).round().max(1.0) as u32)
+        } else {
+            ((side as f32 * aspect).round().max(1.0) as u32, side)
+        };
+        (w, h, w as f32 / cols as f32, h as f32 / rows as f32)
+    }
+
+    fn preview_inset(grid: &[Cell], cols: u32, rows: u32, side: u32, inset: f32) -> RgbaImage {
+        let (w, h, cw, ch) = preview_canvas(cols, rows, side);
+        let mut img = RgbaImage::from_pixel(w, h, image::Rgba([0x05, 0x05, 0x08, 255]));
+        for y in 0..rows {
+            for x in 0..cols {
+                let cell = grid[(y * cols + x) as usize];
+                if cell.ch == ' ' {
+                    continue;
+                }
+                let px = image::Rgba([cell.color[0], cell.color[1], cell.color[2], 255]);
+                let x0 = ((x as f32 * cw + inset).round() as i32).max(0) as u32;
+                let y0 = ((y as f32 * ch + inset).round() as i32).max(0) as u32;
+                let x1 = ((((x + 1) as f32 * cw) - inset).round() as u32).min(w);
+                let y1 = ((((y + 1) as f32 * ch) - inset).round() as u32).min(h);
+                for yy in y0..y1 {
+                    for xx in x0..x1 {
+                        img.put_pixel(xx, yy, px);
+                    }
+                }
+            }
+        }
+        img
+    }
+
+    fn preview_abut(grid: &[Cell], cols: u32, rows: u32, side: u32) -> RgbaImage {
+        preview_inset(grid, cols, rows, side, 0.0)
+    }
+
+    fn chars_overlap_preview(grid: &[Cell], cols: u32, rows: u32, side: u32) -> RgbaImage {
+        let (w, h, cw, ch) = preview_canvas(cols, rows, side);
+        let mut img = RgbaImage::from_pixel(w, h, image::Rgba([0x05, 0x05, 0x08, 255]));
+        let glyph_w = (ch * crate::ascii::MONO_ADVANCE).max(1.0);
+        for y in 0..rows {
+            for x in 0..cols {
+                let cell = grid[(y * cols + x) as usize];
+                if cell.ch == ' ' {
+                    continue;
+                }
+                let px = image::Rgba([cell.color[0], cell.color[1], cell.color[2], 255]);
+                let x0 = x as f32 * cw;
+                let y0 = y as f32 * ch;
+                let x1 = (x0 + glyph_w).min(w as f32);
+                let y1 = (y0 + ch).min(h as f32);
+                for yy in y0 as u32..y1 as u32 {
+                    for xx in x0 as u32..x1 as u32 {
+                        if xx < w && yy < h {
+                            img.put_pixel(xx, yy, px);
+                        }
+                    }
+                }
+            }
+        }
+        img
+    }
+
+    fn old_mosaic(grid: &[Cell], cols: u32, rows: u32, mark: Mark) -> RgbaImage {
+        let (cw, ch) = match mark {
+            Mark::Cells => (8u32, 8u32),
+            Mark::Chars => (8u32, 16u32),
+        };
+        let mut img = RgbaImage::from_pixel(cols * cw, rows * ch, image::Rgba([0x05, 0x05, 0x08, 255]));
+        for y in 0..rows {
+            for x in 0..cols {
+                let cell = grid[(y * cols + x) as usize];
+                if cell.ch == ' ' {
+                    continue;
+                }
+                let px = image::Rgba([cell.color[0], cell.color[1], cell.color[2], 255]);
+                let x0 = x * cw;
+                let y0 = y * ch;
+                for dy in 0..ch {
+                    for dx in 0..cw {
+                        img.put_pixel(x0 + dx, y0 + dy, px);
+                    }
+                }
+            }
+        }
+        img
+    }
+
+    fn old_svg_4bit(grid: &[Cell], cols: u32, rows: u32, mark: Mark) -> String {
+        let (cw, ch) = match mark {
+            Mark::Cells => (8u32, 8u32),
+            Mark::Chars => (8u32, 16u32),
+        };
+        let snap = |c: [u8; 3]| [c[0] & 0xf0, c[1] & 0xf0, c[2] & 0xf0];
+        let w = cols * cw;
+        let h = rows * ch;
+        let mut out = svg_open(w, h);
+        for y in 0..rows {
+            let row = (y * cols) as usize;
+            if row >= grid.len() {
+                break;
+            }
+            let mut x = 0u32;
+            while x < cols {
+                let idx = row + x as usize;
+                if idx >= grid.len() {
+                    break;
+                }
+                let cell = grid[idx];
+                if cell.ch == ' ' {
+                    x += 1;
+                    continue;
+                }
+                let color = snap(cell.color);
+                let mut n = 1u32;
+                while x + n < cols {
+                    let nidx = row + (x + n) as usize;
+                    if nidx >= grid.len() {
+                        break;
+                    }
+                    let next = grid[nidx];
+                    if next.ch == ' ' || snap(next.color) != color {
+                        break;
+                    }
+                    n += 1;
+                }
+                out.push_str(&format!(
+                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{ch}\" fill=\"#{:02x}{:02x}{:02x}\"/>\n",
+                    x * cw,
+                    y * ch,
+                    n * cw,
+                    color[0],
+                    color[1],
+                    color[2]
+                ));
+                x += n;
+            }
+        }
+        out.push_str("</svg>\n");
+        out
     }
 
     #[test]
@@ -689,7 +965,7 @@ mod tests {
         crate::ascii::Look::Visor.apply(&mut s);
         s.mark = crate::ascii::Mark::Cells;
         s.color_kind = crate::ascii::ColorKind::Visor;
-        let (cols, rows, grid) = convert_for_svg(&img, &s);
+        let (cols, rows, grid) = crate::ascii::convert(&img, &s);
         let svg = to_svg(cols, rows, &grid, s.mark);
         let bytes = svg.len();
         let texts = svg.matches("<text").count();
@@ -699,17 +975,63 @@ mod tests {
             cols * rows,
             bytes as f64 / (1024.0 * 1024.0),
         );
-        assert_eq!(cols, SVG_MAX_COLS);
-        assert!(
-            bytes < 400_000,
-            "SVG too heavy for Figma: {bytes} bytes ({:.2} MB) at {cols}×{rows}",
-            bytes as f64 / (1024.0 * 1024.0)
-        );
-        assert!(
-            rects < 5_000,
-            "too many SVG nodes for Figma: {rects} rects at {cols}×{rows}"
-        );
+        assert_eq!(cols, 200);
+        assert!(!svg.contains("#50a0a0"), "4-bit snap leaked into SVG");
         assert_eq!(texts, 0);
+        assert!(rects > 1);
+    }
+
+    #[test]
+    fn high_cols_solid_cells_have_no_ground_gaps() {
+        let img = RgbaImage::from_pixel(160, 160, image::Rgba([255, 255, 255, 255]));
+        let mut s = crate::ascii::Settings::default();
+        s.cols = 320;
+        crate::ascii::Look::Blocks.apply(&mut s);
+        s.color_kind = crate::ascii::ColorKind::Source;
+        s.mark = Mark::Cells;
+        let (cols, rows, grid) = crate::ascii::convert(&img, &s);
+        assert_eq!(cols, 320);
+        assert!(grid.iter().all(|c| c.ch != ' '));
+        let mosaic = mosaic_rgba(cols, rows, &grid, Mark::Cells);
+        let (cw, _) = cell_px(cols, rows, Mark::Cells);
+        assert!(cw >= 1);
+        assert_eq!(mosaic.width(), cols * cw);
+        for p in mosaic.pixels() {
+            assert_eq!(
+                p.0,
+                [255, 255, 255, 255],
+                "ground or inset gap in high-col cells"
+            );
+        }
+    }
+
+    #[test]
+    fn chars_export_paints_glyphs() {
+        let img = RgbaImage::from_pixel(40, 20, image::Rgba([255, 255, 255, 255]));
+        let mut s = crate::ascii::Settings::default();
+        s.cols = 16;
+        crate::ascii::Look::Blocks.apply(&mut s);
+        s.color_kind = crate::ascii::ColorKind::Cream;
+        s.mark = Mark::Chars;
+        let (cols, rows, grid) = crate::ascii::convert(&img, &s);
+        assert!(grid.iter().any(|c| c.ch != ' '));
+        let mosaic = mosaic_rgba(cols, rows, &grid, Mark::Chars);
+        let painted = mosaic.pixels().filter(|p| p.0 != [0x05, 0x05, 0x08, 255]).count();
+        assert!(
+            painted > 100,
+            "CHARS raster should paint glyphs, got {painted} lit pixels"
+        );
+    }
+
+    #[test]
+    fn svg_keeps_exact_rgb_not_4bit() {
+        let cell = Cell {
+            ch: '█',
+            color: [0x59, 0x2a, 0xa4],
+        };
+        let svg = to_svg(1, 1, &[cell], Mark::Cells);
+        assert!(svg.contains("#592aa4"), "{svg}");
+        assert!(!svg.contains("#5020a0"), "{svg}");
     }
 
     #[test]

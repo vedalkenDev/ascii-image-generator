@@ -1,6 +1,6 @@
 # Density, invert, knob
 
-Every look keeps a density slider (16–200 columns, default 80), invert, and one analog knob that look actually uses (weight on Visor/Blocks, glow on CRT, chroma on ANSI). Changing a control redraws the theater.
+Every look keeps a density slider (16–400 columns, default 80), invert, and one analog knob that look actually uses (weight on Visor/Blocks, glow on CRT, chroma on ANSI). Changing a control redraws the theater.
 
 ## Sub-features
 
@@ -16,8 +16,8 @@ Every look keeps a density slider (16–200 columns, default 80), invert, and on
 
 ## How to get to it (user POV)
 
-- Drag the `cols` bar under `:: DENSITY` (16–200).
-- Choose `INVERT` under the current look's section (`:: VISOR` / `:: BLOCKS` / `:: CRT` / `:: ANSI`).
+- Drag the `cols` bar under `:: DENSITY` (16–400).
+- Choose `INVERT` under the current look's section (`:: VISOR` / `:: BLOCKS` / `:: CRT` / `:: ANSI` / `:: DITHER` / `:: HATCH` / `:: SCAN`).
 - Drag the analog bar under that same section.
 
 ## Driving it with verify-ascii

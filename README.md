@@ -39,8 +39,11 @@ The sidebar is a catalog of the loaded still, not a settings form.
 | **Blocks** | Block glyphs in the still’s own colour |
 | **CRT** | Amber phosphor punctuation, terminal-style |
 | **ANSI** | Letter and number glyphs in the still’s colour |
+| **Dither** | Bayer stipple, occupied or empty |
+| **Hatch** | Diagonal occupancy, sage phosphor |
+| **Scan** | Interlace rows, teal phosphor |
 
-Each look keeps **CELLS** (square mosaic) or **CHARS** (glyphs), a density slider (**16–200** columns, default **80**), colour (**SOURCE** / **VISOR** / **AMBER** / **CREAM**), invert, and one knob that look actually uses (weight, glow, or chroma). CELLS is the default. Colour stays put when you switch looks.
+Each look keeps **CELLS** (square mosaic) or **CHARS** (glyphs), a density slider (**16–400** columns, default **80**), colour (**SOURCE** / **VISOR** / **AMBER** / **CREAM** / **TEAL** / **CORAL** / **SAGE**), invert, and one knob that look actually uses (weight, glow, or chroma). CELLS is the default. Colour stays put when you switch looks. Weight goes **0.4–4.0**.
 
 ## Run on Linux
 
@@ -83,7 +86,7 @@ On the web build, downloads go straight to the browser **Downloads** folder. Sag
 
 **COLOUR** includes **DUO**: the still is read as luma, then mapped from **INK** to **PAPER** (real RGB pickers). Looks still sit on top.
 
-**SVG** is built for Figma: CELLS as merged `<rect>` runs, CHARS as one `<text>` row of `<tspan>`s, fills snapped to 4-bit colour so neighbours collapse. Export reconverts at **80 columns** even if the theater slider is higher, so a phone still does not dump 70k text nodes.
+**SVG** uses the theater grid: CELLS as merged `<rect>` runs, CHARS as one `<text>` row of per-cell `<tspan>`s. Fills are the same 8-bit RGB as the preview. Raster export tiles the same cells (long side about 1600px) so high columns stay abutting instead of an 8px stamp.
 
 ## License
 

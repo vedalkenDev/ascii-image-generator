@@ -1,0 +1,686 @@
+#!/usr/bin/env python3
+"""Drive an isolated Cosmic Archive — ASCII window for verification.
+
+Never kill by process name or window title. Only the PID recorded by `launch`.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+TITLE = "Cosmic Archive — ASCII"
+BINARY_NAME = "ascii-image-generator"
+DEFAULT_SIZE = (1100, 680)
+DEFAULT_POS = (24, 48)
+DEFAULT_WORKSPACE = 5
+LAUNCH_TIMEOUT = 45
+READY_TIMEOUT = 20
+
+SIDEBAR_W = 320
+MARGIN = 14
+GAP = 6
+CONTENT_W = SIDEBAR_W - 2 * MARGIN
+CARD_W = (CONTENT_W - GAP) / 2.0
+CHIP_W = (CONTENT_W - 12.0) / 3.0
+
+# Sidebar-relative click centers, calibrated from the 320×720 chrome
+# (widget y is independent of window height until the list scrolls).
+HANDLES = {
+    "open.still": "open_still",
+    "theater": "theater",
+    "look.visor": "look_visor",
+    "look.blocks": "look_blocks",
+    "look.crt": "look_crt",
+    "look.ansi": "look_ansi",
+    "density.32": "density_32",
+    "density.80": "density_80",
+    "density.132": "density_132",
+    "invert": "invert",
+    "knob": "knob",
+    "out.txt": "out_txt",
+    "out.svg": "out_svg",
+    "out.ansi": "out_ansi",
+    "copy.txt": "copy_txt",
+}
+
+SCRIPT = Path(__file__).resolve()
+REPO = SCRIPT.parents[4]
+BINARY = REPO / "target" / "release" / BINARY_NAME
+SAMPLE = REPO / "sample.png"
+
+
+def evidence_dir() -> Path:
+    override = os.environ.get("ASCII_VERIFY_EVIDENCE")
+    if override:
+        return Path(override)
+    return Path(
+        "/home/luqmaan/.local/state/cursor/agent-stores/"
+        "cursor_agent_stores/bc-af75a5c8-0b95-4049-b2af-9d16f70c2afa/"
+        "files/media/ascii-generator/verify"
+    )
+
+
+def run_dir() -> Path:
+    override = os.environ.get("ASCII_VERIFY_DIR")
+    if override:
+        return Path(override)
+    return Path(f"/tmp/ascii-verify-{os.environ.get('USER', 'user')}")
+
+
+def state_path() -> Path:
+    return run_dir() / "state.json"
+
+
+def ensure_cargo_path() -> None:
+    cargo_bin = Path.home() / ".cargo" / "bin"
+    path = os.environ.get("PATH", "")
+    if str(cargo_bin) not in path.split(":"):
+        os.environ["PATH"] = f"{cargo_bin}:{path}"
+
+
+def load_state() -> dict:
+    path = state_path()
+    if not path.exists():
+        die(f"no verification state at {path}; run launch first")
+    return json.loads(path.read_text())
+
+
+def save_state(state: dict) -> None:
+    path = state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2) + "\n")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"verify-ascii: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, text=True, capture_output=True, **kwargs)
+
+
+def hypr_dispatch(lua: str) -> str:
+    proc = run(["hyprctl", "dispatch", lua])
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or out.strip().startswith("error:"):
+        die(f"hyprctl dispatch failed: {lua}\n{out.strip()}")
+    return out.strip()
+
+
+def hypr_clients() -> list[dict]:
+    proc = run(["hyprctl", "clients", "-j"])
+    if proc.returncode != 0:
+        die(f"hyprctl clients failed: {proc.stderr}")
+    return json.loads(proc.stdout)
+
+
+def window_for_pid(pid: int) -> dict | None:
+    matches = [
+        c
+        for c in hypr_clients()
+        if c.get("pid") == pid and c.get("title") == TITLE and c.get("mapped")
+    ]
+    return matches[0] if matches else None
+
+
+def cosmic_pids() -> list[int]:
+    return [c.get("pid") for c in hypr_clients() if c.get("title") == TITLE]
+
+
+def focus_workspace(slot: int) -> None:
+    hypr_dispatch(f"o.workspaces.focus({int(slot)})")
+
+
+def focus_pid(pid: int) -> None:
+    hypr_dispatch(f'hl.dsp.focus({{ window = hl.get_window("pid:{int(pid)}") }})')
+
+
+def isolate_window(pid: int) -> None:
+    win = f'hl.get_window("pid:{int(pid)}")'
+    hypr_dispatch(f"hl.dsp.window.float({{ window = {win}, action = \"set\" }})")
+    time.sleep(0.15)
+    x, y = DEFAULT_SIZE
+    hypr_dispatch(f"hl.dsp.window.resize({{ window = {win}, x = {x}, y = {y} }})")
+    time.sleep(0.1)
+    px, py = DEFAULT_POS
+    hypr_dispatch(f"hl.dsp.window.move({{ window = {win}, x = {px}, y = {py} }})")
+
+
+def handle_point(handle: str, geom: dict) -> tuple[float, float]:
+    if handle not in HANDLES:
+        known = ", ".join(HANDLES)
+        die(f"unknown handle {handle!r}. Known: {known}")
+    w = float(geom["size"][0])
+    h = float(geom["size"][1])
+    ax, ay = float(geom["at"][0]), float(geom["at"][1])
+    sb = w - SIDEBAR_W
+    left_x = sb + MARGIN + CARD_W / 2.0
+    right_x = sb + MARGIN + CARD_W + GAP + CARD_W / 2.0
+    chip_xs = [
+        sb + MARGIN + CHIP_W / 2.0,
+        sb + MARGIN + CHIP_W + 6.0 + CHIP_W / 2.0,
+        sb + MARGIN + 2.0 * (CHIP_W + 6.0) + CHIP_W / 2.0,
+    ]
+    full_x = sb + MARGIN + CONTENT_W / 2.0
+    key = HANDLES[handle]
+    local = {
+        "open_still": (full_x, 112.0),
+        "theater": ((w - SIDEBAR_W) / 2.0, h / 2.0),
+        "look_visor": (left_x, 206.0),
+        "look_blocks": (right_x, 206.0),
+        "look_crt": (left_x, 298.0),
+        "look_ansi": (right_x, 298.0),
+        "density_32": (chip_xs[0], 392.0),
+        "density_80": (chip_xs[1], 392.0),
+        "density_132": (chip_xs[2], 392.0),
+        "invert": (full_x, 433.0),
+        "knob": (sb + MARGIN + CONTENT_W * 0.80, 474.0),
+        "out_txt": (chip_xs[0], 588.0),
+        "out_svg": (chip_xs[1], 588.0),
+        "out_ansi": (chip_xs[2], 588.0),
+        "copy_txt": (full_x, 628.0),
+    }[key]
+    return ax + local[0], ay + local[1]
+
+
+def pointer_click_bin() -> Path:
+    return run_dir() / "pointer-click"
+
+
+def ensure_pointer_click() -> Path:
+    """Build the wlr-virtual-pointer clicker if missing or stale."""
+    dest = pointer_click_bin()
+    scripts = SCRIPT.parent
+    xml = scripts / "wlr-virtual-pointer-unstable-v1.xml"
+    src = scripts / "pointer-click.c"
+    header = dest.parent / "wlr-virtual-pointer-unstable-v1-client-protocol.h"
+    proto = dest.parent / "wlr-virtual-pointer-unstable-v1-protocol.c"
+    if not xml.exists() or not src.exists():
+        die(f"missing virtual-pointer sources in {scripts}")
+    if (
+        dest.exists()
+        and dest.stat().st_mtime >= src.stat().st_mtime
+        and dest.stat().st_mtime >= xml.stat().st_mtime
+    ):
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    scanner = shutil.which("wayland-scanner")
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if not scanner or not cc:
+        die("wayland-scanner and cc are required to build pointer-click")
+    for cmd in (
+        [scanner, "client-header", str(xml), str(header)],
+        [scanner, "private-code", str(xml), str(proto)],
+    ):
+        proc = run(cmd)
+        if proc.returncode != 0:
+            die(f"{' '.join(cmd)} failed\n{proc.stderr}")
+    cflags = run(["pkg-config", "--cflags", "--libs", "wayland-client"])
+    if cflags.returncode != 0:
+        die("pkg-config wayland-client failed")
+    flags = cflags.stdout.split()
+    proc = run(
+        [cc, "-O2", "-o", str(dest), str(src), str(proto), f"-I{dest.parent}", *flags]
+    )
+    if proc.returncode != 0:
+        die(f"cc pointer-click failed\n{proc.stderr}")
+    dest.chmod(0o755)
+    return dest
+
+
+def monitor_extent() -> tuple[int, int]:
+    proc = run(["hyprctl", "monitors", "-j"])
+    if proc.returncode != 0:
+        die(f"hyprctl monitors failed: {proc.stderr}")
+    mons = json.loads(proc.stdout)
+    focused = next((m for m in mons if m.get("focused")), mons[0])
+    return int(focused["width"]), int(focused["height"])
+
+
+def click_xy(x: float, y: float, pid: int) -> None:
+    """Real pointer button via wlr-virtual-pointer. send_key_state(mouse:272) does not reach eframe."""
+    focus_pid(pid)
+    time.sleep(0.05)
+    hypr_dispatch(f"hl.dsp.cursor.move({{ x = {x:.1f}, y = {y:.1f} }})")
+    time.sleep(0.05)
+    clicker = ensure_pointer_click()
+    ex, ey = monitor_extent()
+    proc = run([str(clicker), str(int(round(x))), str(int(round(y))), str(ex), str(ey)])
+    if proc.returncode != 0:
+        die(f"pointer-click failed: {(proc.stderr or proc.stdout).strip()}")
+    time.sleep(0.08)
+
+
+def cmdline_of(pid: int) -> str:
+    path = Path(f"/proc/{pid}/cmdline")
+    if not path.exists():
+        return ""
+    return path.read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def doctor_payload() -> dict:
+    state = load_state()
+    pid = int(state["pid"])
+    alive = pid_alive(pid)
+    cmd = cmdline_of(pid) if alive else ""
+    win = window_for_pid(pid) if alive else None
+    ours = alive and BINARY_NAME in cmd and pid == int(state["pid"])
+    payload = {
+        "ok": False,
+        "pid": pid,
+        "alive": alive,
+        "cmdline": cmd,
+        "title_ok": bool(win and win.get("title") == TITLE),
+        "window": None
+        if not win
+        else {
+            "address": win.get("address"),
+            "at": win.get("at"),
+            "size": win.get("size"),
+            "workspace": (win.get("workspace") or {}).get("name"),
+            "floating": win.get("floating"),
+        },
+        "binary": str(BINARY),
+        "binary_exists": BINARY.exists(),
+        "foreign_pids": state.get("foreign_pids", []),
+        "evidence": str(evidence_dir()),
+    }
+    payload["ok"] = bool(
+        payload["alive"]
+        and payload["title_ok"]
+        and ours
+        and pid not in payload["foreign_pids"]
+    )
+    if not payload["ok"]:
+        reasons = []
+        if not payload["alive"]:
+            reasons.append("process is dead")
+        if not payload["title_ok"]:
+            reasons.append(f"no mapped window titled {TITLE!r} for this pid")
+        if pid in payload["foreign_pids"]:
+            reasons.append("pid is a pre-existing instance")
+        payload["reason"] = "; ".join(reasons) or "instance is not ours"
+    return payload
+
+
+def cmd_launch(args: argparse.Namespace) -> None:
+    ensure_cargo_path()
+    if not shutil.which("cargo"):
+        die("cargo not on PATH; add ~/.cargo/bin")
+    if not shutil.which("hyprctl") or not shutil.which("grim"):
+        die("hyprctl and grim are required")
+    still = None if args.empty else Path(args.still or SAMPLE).resolve()
+    if still is not None and not still.exists():
+        die(f"still not found: {still}")
+
+    dest = run_dir()
+    dest.mkdir(parents=True, exist_ok=True)
+    evidence_dir().mkdir(parents=True, exist_ok=True)
+
+    existing_state = state_path()
+    if existing_state.exists():
+        prev = json.loads(existing_state.read_text())
+        prev_pid = int(prev.get("pid", -1))
+        if pid_alive(prev_pid) and window_for_pid(prev_pid):
+            die(
+                f"a verification instance is already running (pid {prev_pid}). "
+                "Run cleanup first."
+            )
+
+    print("verify-ascii: building release binary", flush=True)
+    build = run(["cargo", "build", "--release"], cwd=REPO)
+    if build.returncode != 0:
+        die(f"cargo build --release failed\n{build.stderr}")
+    if not BINARY.exists():
+        die(f"missing {BINARY}")
+
+    foreign = cosmic_pids()
+    prev_ws = None
+    try:
+        active = json.loads(run(["hyprctl", "activeworkspace", "-j"]).stdout)
+        prev_ws = active.get("id")
+    except Exception:
+        prev_ws = None
+
+    focus_workspace(args.workspace)
+    time.sleep(0.2)
+
+    log_path = dest / "app.log"
+    log = open(log_path, "w")
+    env = os.environ.copy()
+    env["PREFERS_REDUCED_MOTION"] = "1"
+    argv = [str(BINARY)]
+    if still is not None:
+        argv.append(str(still))
+    proc = subprocess.Popen(
+        argv,
+        cwd=str(REPO),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True,
+    )
+    state = {
+        "pid": proc.pid,
+        "argv": argv,
+        "still": None if still is None else str(still),
+        "foreign_pids": foreign,
+        "prev_workspace": prev_ws,
+        "workspace": args.workspace,
+        "log": str(log_path),
+        "binary": str(BINARY),
+        "repo": str(REPO),
+        "evidence": str(evidence_dir()),
+        "launched_at": time.time(),
+    }
+    save_state(state)
+
+    deadline = time.time() + LAUNCH_TIMEOUT
+    win = None
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            die(
+                f"process exited {proc.returncode} before a window appeared. "
+                f"See {log_path}"
+            )
+        win = window_for_pid(proc.pid)
+        if win:
+            break
+        time.sleep(0.2)
+    if not win:
+        die(f"timed out waiting for window pid={proc.pid} title={TITLE!r}")
+
+    isolate_window(proc.pid)
+    time.sleep(0.4)
+    win = window_for_pid(proc.pid) or win
+    state["address"] = win.get("address")
+    state["at"] = win.get("at")
+    state["size"] = win.get("size")
+    save_state(state)
+
+    if still is not None:
+        wait_loaded(proc.pid, READY_TIMEOUT)
+    print(json.dumps({"ok": True, "pid": proc.pid, "window": state}, indent=2))
+
+
+def wait_loaded(pid: int, timeout: float) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        path = run_dir() / "_ready.png"
+        shot_window(pid, path)
+        text = ocr_file(path).upper()
+        if "READING STILL" in text:
+            time.sleep(0.3)
+            continue
+        if "NO STILL LOADED" in text:
+            time.sleep(0.3)
+            continue
+        return
+    # Tiny stills decode immediately; timeout is not fatal if the window still paints.
+    return
+
+
+def shot_window(pid: int, dest: Path) -> Path:
+    win = window_for_pid(pid)
+    if not win:
+        die(f"cannot screenshot; no window for pid {pid}")
+    focus_pid(pid)
+    time.sleep(0.08)
+    x, y = win["at"]
+    w, h = win["size"]
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    geom = f"{x},{y} {w}x{h}"
+    proc = run(["grim", "-g", geom, str(dest)])
+    if proc.returncode != 0 or not dest.exists():
+        die(f"grim failed: {proc.stderr}")
+    return dest
+
+
+def ocr_file(path: Path) -> str:
+    if not shutil.which("tesseract"):
+        return ""
+    proc = run(["tesseract", str(path), "stdout", "--psm", "6"])
+    return proc.stdout or ""
+
+
+def cmd_doctor(_: argparse.Namespace) -> None:
+    payload = doctor_payload()
+    print(json.dumps(payload, indent=2))
+    if not payload["ok"]:
+        raise SystemExit(2)
+
+
+def cmd_click(args: argparse.Namespace) -> None:
+    payload = doctor_payload()
+    if not payload["ok"]:
+        die(payload.get("reason", "doctor failed"))
+    pid = int(payload["pid"])
+    win = window_for_pid(pid)
+    x, y = handle_point(args.handle, win)
+    click_xy(x, y, pid)
+    time.sleep(0.25)
+    payload = {"ok": True, "handle": args.handle, "xy": [x, y]}
+    if args.handle.startswith("out.") or args.handle == "open.still":
+        payload["warning"] = (
+            "rfd portal dialog is open; dismiss with `verify-ascii key Escape` "
+            "or the dialog will keep the export worker busy"
+        )
+    print(json.dumps(payload, indent=2))
+
+
+def cmd_screenshot(args: argparse.Namespace) -> None:
+    payload = doctor_payload()
+    if not payload["ok"]:
+        die(payload.get("reason", "doctor failed"))
+    dest = Path(args.path) if args.path else evidence_dir() / f"{args.name}.png"
+    if dest.suffix != ".png":
+        dest = dest.with_suffix(".png")
+    shot_window(int(payload["pid"]), dest)
+    text = ocr_file(dest)
+    meta = dest.with_suffix(".ocr.txt")
+    if text.strip():
+        meta.write_text(text)
+    print(json.dumps({"ok": True, "path": str(dest), "ocr": text.strip()[:500]}, indent=2))
+
+
+def cmd_ocr(args: argparse.Namespace) -> None:
+    path = Path(args.path)
+    if not path.exists():
+        die(f"no image {path}")
+    text = ocr_file(path)
+    print(text)
+
+
+def cmd_window(_: argparse.Namespace) -> None:
+    payload = doctor_payload()
+    if not payload["ok"]:
+        die(payload.get("reason", "doctor failed"))
+    print(json.dumps(payload["window"], indent=2))
+
+
+def cmd_key(args: argparse.Namespace) -> None:
+    payload = doctor_payload()
+    if not payload["ok"]:
+        die(payload.get("reason", "doctor failed"))
+    focus_pid(int(payload["pid"]))
+    time.sleep(0.05)
+    key = args.key
+    if shutil.which("wtype"):
+        proc = run(["wtype", "-k", key])
+        if proc.returncode != 0:
+            die(f"wtype failed: {proc.stderr}")
+    else:
+        hypr_dispatch(f'hl.dsp.send_shortcut({{ mods = "", key = "{key}" }})')
+    print(json.dumps({"ok": True, "key": key}, indent=2))
+
+
+def cmd_handles(_: argparse.Namespace) -> None:
+    print("\n".join(HANDLES))
+
+
+def cmd_encode(args: argparse.Namespace) -> None:
+    ensure_cargo_path()
+    dest = Path(args.dir) if args.dir else evidence_dir() / "export"
+    dest.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["ASCII_PROOF_DIR"] = str(dest)
+    proc = subprocess.run(
+        [
+            "cargo",
+            "test",
+            "--manifest-path",
+            str(REPO / "Cargo.toml"),
+            "write_export_proofs_if_asked",
+            "--",
+            "--exact",
+            "--nocapture",
+        ],
+        cwd=str(REPO),
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    print(proc.stdout)
+    if proc.stderr:
+        print(proc.stderr, file=sys.stderr)
+    if proc.returncode != 0:
+        die("encode test failed")
+    files = sorted(p.name for p in dest.iterdir() if p.is_file())
+    print(json.dumps({"ok": True, "dir": str(dest), "files": files}, indent=2))
+
+
+def cmd_cargo_tests(_: argparse.Namespace) -> None:
+    ensure_cargo_path()
+    proc = subprocess.run(
+        ["cargo", "test", "--manifest-path", str(REPO / "Cargo.toml")],
+        cwd=str(REPO),
+        text=True,
+    )
+    raise SystemExit(proc.returncode)
+
+
+def cmd_cleanup(args: argparse.Namespace) -> None:
+    path = state_path()
+    if not path.exists():
+        print(json.dumps({"ok": True, "cleaned": False, "reason": "no state"}))
+        return
+    state = json.loads(path.read_text())
+    pid = int(state.get("pid", -1))
+    foreign = set(state.get("foreign_pids") or [])
+    evidence = str(evidence_dir())
+    killed = False
+    if pid > 1 and pid not in foreign and pid_alive(pid):
+        cmd = cmdline_of(pid)
+        if BINARY_NAME not in cmd:
+            die(f"refusing to kill pid {pid}; cmdline is {cmd!r}")
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(25):
+            if not pid_alive(pid):
+                killed = True
+                break
+            time.sleep(0.1)
+        if pid_alive(pid):
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.1)
+            killed = not pid_alive(pid)
+        if pid_alive(pid):
+            die(f"pid {pid} survived SIGTERM/SIGKILL")
+        killed = True
+    elif pid in foreign:
+        die(f"refusing to kill foreign pid {pid}")
+    # Restore the workspace we left, not anyone else's window.
+    prev = state.get("prev_workspace")
+    if prev and not args.keep_workspace:
+        try:
+            focus_workspace(int(prev))
+        except SystemExit:
+            pass
+    if path.exists():
+        path.unlink()
+    leftover = window_for_pid(pid) if pid > 1 else None
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "killed": killed,
+                "pid": pid,
+                "evidence_kept": evidence,
+                "window_gone": leftover is None,
+            },
+            indent=2,
+        )
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="verify-ascii")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    launch = sub.add_parser("launch", help="build and start an isolated instance")
+    launch.add_argument("--empty", action="store_true", help="no still (empty theater)")
+    launch.add_argument("--still", help="path to still; default sample.png")
+    launch.add_argument("--workspace", type=int, default=DEFAULT_WORKSPACE)
+    launch.set_defaults(func=cmd_launch)
+
+    d = sub.add_parser("doctor", help="is this instance worth driving?")
+    d.set_defaults(func=cmd_doctor)
+
+    c = sub.add_parser("click", help="click a named chrome handle")
+    c.add_argument("handle")
+    c.set_defaults(func=cmd_click)
+
+    s = sub.add_parser("screenshot", help="grim the verification window")
+    s.add_argument("name", nargs="?", default="shot")
+    s.add_argument("--path")
+    s.set_defaults(func=cmd_screenshot)
+
+    o = sub.add_parser("ocr", help="tesseract a captured png")
+    o.add_argument("path")
+    o.set_defaults(func=cmd_ocr)
+
+    w = sub.add_parser("window", help="print geometry")
+    w.set_defaults(func=cmd_window)
+
+    k = sub.add_parser("key", help="send a key to the focused verification window")
+    k.add_argument("key")
+    k.set_defaults(func=cmd_key)
+
+    h = sub.add_parser("handles", help="list click handles")
+    h.set_defaults(func=cmd_handles)
+
+    e = sub.add_parser("encode", help="write TXT/SVG/ANSI/PNG/HTML via io::encode")
+    e.add_argument("--dir")
+    e.set_defaults(func=cmd_encode)
+
+    t = sub.add_parser("cargo-tests", help="unit tests in ascii.rs / io.rs")
+    t.set_defaults(func=cmd_cargo_tests)
+
+    cl = sub.add_parser("cleanup", help="kill only the PID launch started")
+    cl.add_argument("--keep-workspace", action="store_true")
+    cl.set_defaults(func=cmd_cleanup)
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

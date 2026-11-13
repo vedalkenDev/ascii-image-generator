@@ -1,12 +1,9 @@
 use std::io::Cursor;
 #[cfg(not(target_arch = "wasm32"))]
-use std::io::Write;
-#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
-use std::process::{Command, Stdio};
 
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, RgbaImage};
+use resvg::{tiny_skia, usvg};
 
 use crate::ascii::Cell;
 
@@ -34,8 +31,7 @@ pub fn load_path(path: &Path) -> Result<RgbaImage, String> {
 
 pub fn load_bytes(bytes: &[u8]) -> Result<RgbaImage, String> {
     if looks_like_svg(bytes) {
-        let img = magick_downscale(bytes).map_err(|_| "Could not rasterize SVG.".to_string())?;
-        return Ok(downscale_max_side(img, MAX_SIDE));
+        return rasterize_svg(bytes);
     }
     let format = image::guess_format(bytes).ok();
     let (w, h) = peek_size(bytes).unwrap_or((0, 0));
@@ -43,9 +39,6 @@ pub fn load_bytes(bytes: &[u8]) -> Result<RgbaImage, String> {
     let oversized = w.max(h) > MAX_SIDE || pixels > MAX_DECODE_PIXELS;
 
     if oversized {
-        if let Ok(img) = magick_downscale(bytes) {
-            return Ok(downscale_max_side(img, MAX_SIDE));
-        }
         if format == Some(ImageFormat::Jpeg) {
             if let Ok(img) = load_jpeg_scaled(bytes) {
                 return Ok(downscale_max_side(img, MAX_SIDE));
@@ -66,6 +59,52 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
     let n = bytes.len().min(256);
     let s = String::from_utf8_lossy(&bytes[..n]).to_ascii_lowercase();
     s.contains("<svg")
+}
+
+const SVG_OPEN_HINT: &str =
+    "Could not rasterize this SVG. Export it as a PNG or JPEG and open that instead.";
+
+fn rasterize_svg(bytes: &[u8]) -> Result<RgbaImage, String> {
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
+        .map_err(|_| SVG_OPEN_HINT.to_string())?;
+    let size = tree.size().to_int_size();
+    let w = size.width();
+    let h = size.height();
+    if w == 0 || h == 0 {
+        return Err(SVG_OPEN_HINT.into());
+    }
+    let side = w.max(h);
+    let scale = if side > MAX_SIDE {
+        MAX_SIDE as f32 / side as f32
+    } else {
+        1.0
+    };
+    let out_w = ((w as f32) * scale).round().max(1.0) as u32;
+    let out_h = ((h as f32) * scale).round().max(1.0) as u32;
+    let mut pixmap = tiny_skia::Pixmap::new(out_w, out_h).ok_or(SVG_OPEN_HINT)?;
+    pixmap.fill(tiny_skia::Color::WHITE);
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap_to_rgba(pixmap)
+}
+
+fn pixmap_to_rgba(pixmap: tiny_skia::Pixmap) -> Result<RgbaImage, String> {
+    let w = pixmap.width();
+    let h = pixmap.height();
+    let mut data = pixmap.take();
+    for px in data.chunks_exact_mut(4) {
+        let a = px[3];
+        if a > 0 && a < 255 {
+            let ia = 255.0 / f32::from(a);
+            px[0] = (f32::from(px[0]) * ia).round().min(255.0) as u8;
+            px[1] = (f32::from(px[1]) * ia).round().min(255.0) as u8;
+            px[2] = (f32::from(px[2]) * ia).round().min(255.0) as u8;
+        }
+    }
+    RgbaImage::from_raw(w, h, data).ok_or_else(|| SVG_OPEN_HINT.into())
 }
 
 fn peek_size(bytes: &[u8]) -> Result<(u32, u32), String> {
@@ -142,39 +181,6 @@ fn apply_jpeg_orientation(bytes: &[u8], img: &mut RgbaImage) {
     let mut dynimg = DynamicImage::ImageRgba8(std::mem::take(img));
     dynimg.apply_orientation(orientation);
     *img = dynimg.to_rgba8();
-}
-
-#[cfg(target_arch = "wasm32")]
-fn magick_downscale(_bytes: &[u8]) -> Result<RgbaImage, String> {
-    Err("no magick".into())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn magick_downscale(bytes: &[u8]) -> Result<RgbaImage, String> {
-    let mut child = Command::new("magick")
-        .args([
-            "-define",
-            &format!("jpeg:size={MAX_SIDE}x{MAX_SIDE}"),
-            "-",
-            "-auto-orient",
-            "-resize",
-            &format!("{MAX_SIDE}x{MAX_SIDE}>"),
-            "png:-",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    {
-        let mut stdin = child.stdin.take().ok_or("magick stdin")?;
-        stdin.write_all(bytes).map_err(|e| e.to_string())?;
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).into());
-    }
-    decode_rgba(&out.stdout)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -293,36 +299,7 @@ pub fn to_ansi(cols: u32, rows: u32, grid: &[Cell]) -> String {
 }
 
 pub fn to_png(cols: u32, rows: u32, grid: &[Cell]) -> Result<Vec<u8>, String> {
-    let svg = to_svg(cols, rows, grid);
-    if let Ok(bytes) = magick_svg_png(svg.as_bytes()) {
-        return Ok(bytes);
-    }
     png_mosaic(cols, rows, grid)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn magick_svg_png(_svg: &[u8]) -> Result<Vec<u8>, String> {
-    Err("no magick".into())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn magick_svg_png(svg: &[u8]) -> Result<Vec<u8>, String> {
-    let mut child = Command::new("magick")
-        .args(["svg:-", "png:-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    {
-        let mut stdin = child.stdin.take().ok_or("magick stdin")?;
-        stdin.write_all(svg).map_err(|e| e.to_string())?;
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).into());
-    }
-    Ok(out.stdout)
 }
 
 fn png_mosaic(cols: u32, rows: u32, grid: &[Cell]) -> Result<Vec<u8>, String> {
@@ -441,6 +418,35 @@ mod tests {
         assert!(svg.contains("█"));
         assert!(svg.contains("fill="));
         let _ = (cols, rows);
+    }
+
+    #[test]
+    fn import_svg_rasterizes_without_magick() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+            <rect width="40" height="20" fill="#cc2020"/>
+        </svg>"##;
+        let img = load_bytes(svg).expect("rasterize svg");
+        assert_eq!(img.width(), 40);
+        assert_eq!(img.height(), 20);
+        let p = img.get_pixel(8, 8);
+        assert!(p[0] > 160 && p[1] < 80 && p[2] < 80, "expected red fill, got {p:?}");
+    }
+
+    #[test]
+    fn import_svg_caps_long_side() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="4096" height="512">
+            <rect width="4096" height="512" fill="#4277a2"/>
+        </svg>"##;
+        let img = load_bytes(svg).expect("rasterize wide svg");
+        assert!(img.width() <= MAX_SIDE);
+        assert!(img.height() <= MAX_SIDE);
+        assert_eq!(img.width(), MAX_SIDE);
+    }
+
+    #[test]
+    fn import_broken_svg_asks_for_png() {
+        let err = load_bytes(b"<svg not-actually-svg").expect_err("bad svg");
+        assert!(err.contains("PNG or JPEG"), "{err}");
     }
 
     #[test]

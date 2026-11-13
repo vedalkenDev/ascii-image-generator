@@ -85,11 +85,15 @@ Handles (sidebar, top to bottom):
 | `mark.cells` `mark.chars` | mosaic cells vs character glyphs |
 | `density.32` `density.80` `density.132` | positions along the `cols` slider |
 | `density` | 80% along the `cols` bar |
-| `colour.source` `colour.visor` `colour.amber` `colour.cream` | colour chips |
+| `colour.source` `colour.visor` `colour.amber` `colour.cream` `colour.duo` | colour chips |
+| `colour.ink` `colour.paper` | DUO ink/paper swatch cycle |
 | `invert` | `INVERT` / `INVERT ON` |
 | `knob` | analog bar (weight / glow / chroma) |
-| `out.txt` `out.svg` `out.ansi` | export chips (native rfd; web blob download) |
-| `copy.txt` | `COPY TXT` |
+| `out.vector` `out.raster` | VECTOR vs RASTER family |
+| `out.txt` `out.svg` `out.ansi` | vector chips (shown when VECTOR is on) |
+| `out.png` `out.jpeg` `out.webp` | raster chips (shown when RASTER is on) |
+| `copy.txt` | `COPY TEXT` (raw glyph grid) |
+| `copy.image` | `COPY IMAGE` (PNG mosaic onto the clipboard) |
 
 Clicks go through `scripts/pointer-click` (wlr-virtual-pointer). Hyprland `send_key_state` / `send_shortcut` with `mouse:272` does **not** reach eframe; do not substitute that. The helper builds the clicker on first `click` (`wayland-scanner` + `cc` + `libwayland-client`).
 

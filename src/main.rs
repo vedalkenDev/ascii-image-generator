@@ -11,9 +11,9 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
-use ascii::{Cell, ColorKind, Look, Mark, Settings};
+use ascii::{next_duo_swatch, Cell, ColorKind, Look, Mark, Settings};
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsValue};
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, Galley,
     Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
@@ -91,6 +91,28 @@ struct LookThumb {
     grid: Vec<Cell>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutFamily {
+    Vector,
+    Raster,
+}
+
+impl OutFamily {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Vector => "VECTOR",
+            Self::Raster => "RASTER",
+        }
+    }
+
+    fn kinds(self) -> [io::ExportKind; 3] {
+        match self {
+            Self::Vector => [io::ExportKind::Svg, io::ExportKind::Txt, io::ExportKind::Ansi],
+            Self::Raster => [io::ExportKind::Png, io::ExportKind::Jpeg, io::ExportKind::Webp],
+        }
+    }
+}
+
 struct App {
     settings: Settings,
     look: Look,
@@ -110,6 +132,7 @@ struct App {
     preview: Option<(u64, Vec2, Vec<Arc<Galley>>)>,
     thumbs: Option<((u64, bool, Mark), [LookThumb; 4])>,
     notice: Option<String>,
+    out_family: OutFamily,
 }
 
 impl App {
@@ -139,6 +162,7 @@ impl App {
             preview: None,
             thumbs: None,
             notice: None,
+            out_family: OutFamily::Vector,
         };
         #[cfg(target_arch = "wasm32")]
         install_web_still_hooks(app.jobs_tx.clone(), cc.egui_ctx.clone());
@@ -298,7 +322,7 @@ impl App {
             return;
         }
         ctx.copy_text(io::to_txt(self.cols, self.rows, &self.grid));
-        self.notice = Some("copied".into());
+        self.notice = Some("copied text".into());
         self.error = None;
     }
 
@@ -309,6 +333,40 @@ impl App {
             }
         }
         (self.cols, self.rows, self.grid.clone())
+    }
+
+    fn copy_image(&mut self, ctx: &egui::Context) {
+        if self.grid.is_empty() {
+            self.error = Some("Load a still first.".into());
+            return;
+        }
+        let mark = self.settings.mark;
+        #[cfg(target_arch = "wasm32")]
+        {
+            match io::to_png(self.cols, self.rows, &self.grid, mark) {
+                Ok(bytes) => match web_copy_png(&bytes, self.jobs_tx.clone()) {
+                    Ok(()) => {
+                        self.notice = Some("copied image".into());
+                        self.error = None;
+                        ctx.request_repaint();
+                        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+                    Err(e) => self.error = Some(e),
+                },
+                Err(e) => self.error = Some(e),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match native_copy_image(self.cols, self.rows, &self.grid, mark) {
+                Ok(()) => {
+                    self.notice = Some("copied image".into());
+                    self.error = None;
+                    ctx.request_repaint();
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
     }
 
     fn save_export(&mut self, kind: io::ExportKind) {
@@ -355,6 +413,206 @@ impl App {
             );
         }
     }
+
+    fn paint_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        thumbs: Option<&[LookThumb; 4]>,
+        reduced: bool,
+        busy: Option<&'static str>,
+    ) {
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        ui.add_space(4.0);
+        archive_plate(
+            ui,
+            reduced,
+            &self.source_name,
+            self.look,
+            self.cols,
+            self.rows,
+        );
+        let open_label = match busy {
+            Some("Opening…") => "Opening…",
+            Some("Decoding…") => "Decoding…",
+            _ => {
+                if self.source.is_none() {
+                    "CHOOSE STILL"
+                } else {
+                    "CHANGE STILL"
+                }
+            }
+        };
+        if press_button(ui, open_label, reduced).clicked() {
+            self.open_dialog();
+        }
+        if let Some(err) = &self.error {
+            ui.label(RichText::new(err).color(CORAL).size(12.0));
+        } else if let Some(note) = &self.notice {
+            ui.label(
+                RichText::new(note)
+                    .family(FontFamily::Monospace)
+                    .color(SAGE)
+                    .size(12.0),
+            );
+        }
+
+        section(ui, "LOOK");
+        let gap = 6.0;
+        let card_w = (ui.available_width() - gap) / 2.0;
+        for pair in Look::ALL.chunks(2) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for look in pair {
+                    let thumb = thumbs.and_then(|cards| {
+                        cards.iter().find(|t| t.look == *look)
+                    });
+                    if look_card(
+                        ui,
+                        card_w,
+                        *look,
+                        self.look == *look,
+                        self.settings.mark,
+                        thumb,
+                        reduced,
+                    )
+                    .clicked()
+                    {
+                        self.apply_look(*look);
+                    }
+                }
+            });
+        }
+
+        section(ui, "MARK");
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 6.0) / 2.0;
+            for mark in [Mark::Cells, Mark::Chars] {
+                if chip(
+                    ui,
+                    w,
+                    mark.name(),
+                    self.settings.mark == mark,
+                    reduced,
+                )
+                .clicked()
+                {
+                    self.settings.mark = mark;
+                    self.thumbs = None;
+                    self.dirty = true;
+                }
+            }
+        });
+
+        section(ui, "DENSITY");
+        if archive_dial_u32(ui, "cols", &mut self.settings.cols, 16..=200) {
+            self.dirty = true;
+        }
+
+        section(ui, "COLOUR");
+        let gap = 6.0;
+        let chip_w = (ui.available_width() - gap) / 2.0;
+        for pair in ColorKind::ALL.chunks(2) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                let w = if pair.len() == 1 {
+                    ui.available_width()
+                } else {
+                    chip_w
+                };
+                for kind in pair {
+                    if chip(
+                        ui,
+                        w,
+                        kind.name(),
+                        self.settings.color_kind == *kind,
+                        reduced,
+                    )
+                    .clicked()
+                    {
+                        self.settings.color_kind = *kind;
+                        self.dirty = true;
+                    }
+                }
+            });
+        }
+        if self.settings.color_kind == ColorKind::Duo {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                let w = (ui.available_width() - gap) / 2.0;
+                if chip(ui, w, "INK", true, reduced).clicked() {
+                    self.settings.duo_ink = next_duo_swatch(self.settings.duo_ink);
+                    self.dirty = true;
+                }
+                if chip(ui, w, "PAPER", true, reduced).clicked() {
+                    self.settings.duo_paper =
+                        next_duo_swatch(self.settings.duo_paper);
+                    self.dirty = true;
+                }
+            });
+        }
+
+        section(ui, self.look.name());
+        if chip(
+            ui,
+            ui.available_width(),
+            if self.settings.invert {
+                "INVERT ON"
+            } else {
+                "INVERT"
+            },
+            self.settings.invert,
+            reduced,
+        )
+        .clicked()
+        {
+            self.settings.invert = !self.settings.invert;
+            self.dirty = true;
+        }
+        let (knob, range) = self.look.knob();
+        let analog = match self.look {
+            Look::Visor | Look::Blocks => &mut self.settings.contrast,
+            Look::Crt => &mut self.settings.brightness,
+            Look::Ansi => &mut self.settings.saturation,
+        };
+        if archive_dial_f32(ui, knob, analog, range, 2) {
+            self.dirty = true;
+        }
+
+        section(ui, "OUT");
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 6.0) / 2.0;
+            for family in [OutFamily::Vector, OutFamily::Raster] {
+                if chip(
+                    ui,
+                    w,
+                    family.name(),
+                    self.out_family == family,
+                    reduced,
+                )
+                .clicked()
+                {
+                    self.out_family = family;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 12.0) / 3.0;
+            for kind in self.out_family.kinds() {
+                if chip(ui, w, kind.label(), false, reduced).clicked() {
+                    self.save_export(kind);
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let w = (ui.available_width() - 6.0) / 2.0;
+            if chip(ui, w, "COPY TEXT", false, reduced).clicked() {
+                self.copy_txt(ui.ctx());
+            }
+            if chip(ui, w, "COPY IMAGE", false, reduced).clicked() {
+                self.copy_image(ui.ctx());
+            }
+        });
+    }
 }
 
 impl eframe::App for App {
@@ -368,179 +626,42 @@ impl eframe::App for App {
         }
         let reduced = self.reduced_motion;
         let busy = self.busy;
+        let narrow = ctx.screen_rect().width() < 760.0;
+        self.ensure_thumbs();
+        let thumbs = self.thumbs.as_ref().map(|(_, cards)| cards.clone());
+        let chrome = Frame::new()
+            .fill(GROUND)
+            .inner_margin(Margin::same(14))
+            .stroke(Stroke::NONE);
 
-        egui::SidePanel::right("controls")
-            .resizable(false)
-            .exact_width(320.0)
-            .show_separator_line(false)
-            .frame(
-                Frame::new()
-                    .fill(GROUND)
-                    .inner_margin(Margin::same(14))
-                    .stroke(Stroke::NONE),
-            )
-            .show(ctx, |ui| {
-                self.ensure_thumbs();
-                let thumbs = self.thumbs.as_ref().map(|(_, cards)| cards.clone());
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                        ui.add_space(4.0);
-                        archive_plate(
-                            ui,
-                            reduced,
-                            &self.source_name,
-                            self.look,
-                            self.cols,
-                            self.rows,
-                        );
-                        let open_label = match busy {
-                            Some("Opening…") => "Opening…",
-                            Some("Decoding…") => "Decoding…",
-                            _ => {
-                                if self.source.is_none() {
-                                    "CHOOSE STILL"
-                                } else {
-                                    "CHANGE STILL"
-                                }
-                            }
-                        };
-                        if press_button(ui, open_label, reduced).clicked() {
-                            self.open_dialog();
-                        }
-                        if let Some(err) = &self.error {
-                            ui.label(RichText::new(err).color(CORAL).size(12.0));
-                        } else if let Some(note) = &self.notice {
-                            ui.label(
-                                RichText::new(note)
-                                    .family(FontFamily::Monospace)
-                                    .color(SAGE)
-                                    .size(12.0),
-                            );
-                        }
-
-                        section(ui, "LOOK");
-                        let gap = 6.0;
-                        let card_w = (ui.available_width() - gap) / 2.0;
-                        for pair in Look::ALL.chunks(2) {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = gap;
-                                for look in pair {
-                                    let thumb = thumbs.as_ref().and_then(|cards| {
-                                        cards.iter().find(|t| t.look == *look)
-                                    });
-                                    if look_card(
-                                        ui,
-                                        card_w,
-                                        *look,
-                                        self.look == *look,
-                                        self.settings.mark,
-                                        thumb,
-                                        reduced,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.apply_look(*look);
-                                    }
-                                }
-                            });
-                        }
-
-                        section(ui, "MARK");
-                        ui.horizontal(|ui| {
-                            let w = (ui.available_width() - 6.0) / 2.0;
-                            for mark in [Mark::Cells, Mark::Chars] {
-                                if chip(
-                                    ui,
-                                    w,
-                                    mark.name(),
-                                    self.settings.mark == mark,
-                                    reduced,
-                                )
-                                .clicked()
-                                {
-                                    self.settings.mark = mark;
-                                    self.thumbs = None;
-                                    self.dirty = true;
-                                }
-                            }
+        if narrow {
+            let h = (ctx.screen_rect().height() * 0.50).clamp(260.0, 430.0);
+            egui::TopBottomPanel::bottom("controls")
+                .resizable(false)
+                .exact_height(h)
+                .show_separator_line(false)
+                .frame(chrome)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.paint_controls(ui, thumbs.as_ref(), reduced, busy);
                         });
-
-                        section(ui, "DENSITY");
-                        if archive_dial_u32(ui, "cols", &mut self.settings.cols, 16..=200) {
-                            self.dirty = true;
-                        }
-
-                        section(ui, "COLOUR");
-                        let gap = 6.0;
-                        let chip_w = (ui.available_width() - gap) / 2.0;
-                        for pair in ColorKind::ALL.chunks(2) {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = gap;
-                                for kind in pair {
-                                    if chip(
-                                        ui,
-                                        chip_w,
-                                        kind.name(),
-                                        self.settings.color_kind == *kind,
-                                        reduced,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.settings.color_kind = *kind;
-                                        self.dirty = true;
-                                    }
-                                }
-                            });
-                        }
-
-                        section(ui, self.look.name());
-                        if chip(
-                            ui,
-                            ui.available_width(),
-                            if self.settings.invert {
-                                "INVERT ON"
-                            } else {
-                                "INVERT"
-                            },
-                            self.settings.invert,
-                            reduced,
-                        )
-                        .clicked()
-                        {
-                            self.settings.invert = !self.settings.invert;
-                            self.dirty = true;
-                        }
-                        let (knob, range) = self.look.knob();
-                        let analog = match self.look {
-                            Look::Visor | Look::Blocks => &mut self.settings.contrast,
-                            Look::Crt => &mut self.settings.brightness,
-                            Look::Ansi => &mut self.settings.saturation,
-                        };
-                        if archive_dial_f32(ui, knob, analog, range, 2) {
-                            self.dirty = true;
-                        }
-
-                        section(ui, "OUT");
-                        ui.horizontal(|ui| {
-                            let w = (ui.available_width() - 12.0) / 3.0;
-                            for kind in [
-                                io::ExportKind::Txt,
-                                io::ExportKind::Svg,
-                                io::ExportKind::Ansi,
-                            ] {
-                                if chip(ui, w, kind.label(), false, reduced).clicked() {
-                                    self.save_export(kind);
-                                }
-                            }
+                });
+        } else {
+            egui::SidePanel::right("controls")
+                .resizable(false)
+                .exact_width(320.0)
+                .show_separator_line(false)
+                .frame(chrome)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.paint_controls(ui, thumbs.as_ref(), reduced, busy);
                         });
-                        if chip(ui, ui.available_width(), "COPY TXT", false, reduced).clicked()
-                        {
-                            self.copy_txt(ui.ctx());
-                        }
-                    });
-            });
+                });
+        }
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(GROUND).inner_margin(Margin::same(16)))
@@ -730,6 +851,11 @@ fn install_web_still_hooks(tx: Sender<Job>, ctx: egui::Context) {
         on_over.as_ref().unchecked_ref(),
         &capture,
     );
+    let _ = window.add_event_listener_with_callback_and_add_event_listener_options(
+        "dragenter",
+        on_over.as_ref().unchecked_ref(),
+        &capture,
+    );
     on_over.forget();
 
     let tx_drop = tx.clone();
@@ -911,17 +1037,18 @@ fn urls_from_payload(kind: &str, raw: &str) -> Vec<String> {
 fn urls_from_html(raw: &str) -> Vec<String> {
     let lower = raw.to_ascii_lowercase();
     let mut out = Vec::new();
-    for value in html_attr_values(&lower, raw, "srcset=") {
-        for part in value.split(',') {
-            let tok = part.trim().split_whitespace().next().unwrap_or("");
-            if let Some(u) = normalize_drop_url(&unescape_html(tok)) {
+    for attr in ["srcset=", "data-pin-media=", "data-src=", "src="] {
+        for value in html_attr_values(&lower, raw, attr) {
+            if attr == "srcset=" {
+                for part in value.split(',') {
+                    let tok = part.trim().split_whitespace().next().unwrap_or("");
+                    if let Some(u) = normalize_drop_url(&unescape_html(tok)) {
+                        out.push(u);
+                    }
+                }
+            } else if let Some(u) = normalize_drop_url(&unescape_html(&value)) {
                 out.push(u);
             }
-        }
-    }
-    for value in html_attr_values(&lower, raw, "src=") {
-        if let Some(u) = normalize_drop_url(&unescape_html(&value)) {
-            out.push(u);
         }
     }
     out
@@ -1071,6 +1198,50 @@ fn spawn_save(
             }
         }
     });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_copy_image(cols: u32, rows: u32, grid: &[Cell], mark: Mark) -> Result<(), String> {
+    let img = io::mosaic_rgba(cols, rows, grid, mark);
+    let mut clip =
+        arboard::Clipboard::new().map_err(|e| format!("Could not copy image: {e}"))?;
+    clip.set_image(arboard::ImageData {
+        width: img.width() as usize,
+        height: img.height() as usize,
+        bytes: std::borrow::Cow::Borrowed(img.as_raw()),
+    })
+    .map_err(|e| format!("Could not copy image: {e}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_copy_png(bytes: &[u8], tx: Sender<Job>) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "Could not copy image.".to_string())?;
+    let clipboard = window.navigator().clipboard();
+    let array = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::of1(&array);
+    let props = web_sys::BlobPropertyBag::new();
+    props.set_type("image/png");
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &props)
+        .map_err(|_| "Could not copy image.".to_string())?;
+    let blob_js = JsValue::from(blob);
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let _ = resolve.call1(&JsValue::NULL, &blob_js);
+    });
+    let map = js_sys::Object::new();
+    js_sys::Reflect::set(&map, &JsValue::from_str("image/png"), &promise)
+        .map_err(|_| "Could not copy image.".to_string())?;
+    let item = web_sys::ClipboardItem::new_with_record_from_str_to_blob_promise(&map)
+        .map_err(|_| "Could not copy image.".to_string())?;
+    let items = js_sys::Array::of1(&item);
+    let write = clipboard.write(&JsValue::from(items));
+    wasm_bindgen_futures::spawn_local(async move {
+        if wasm_bindgen_futures::JsFuture::from(write).await.is_err() {
+            let _ = tx.send(Job::Failed(
+                "Could not copy image. Allow clipboard access.".into(),
+            ));
+        }
+    });
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1685,6 +1856,13 @@ mod drop_url_tests {
         let urls = rank_drop_urls(urls_from_payload("text/html", html));
         assert_eq!(urls[0], "https://i.pinimg.com/originals/aa/bb/cc.jpg");
         assert!(!urls.iter().any(|u| u.contains("pinterest.com/pin/")));
+    }
+
+    #[test]
+    fn html_pin_media_attr_is_used() {
+        let html = r#"<img data-pin-media="https://i.pinimg.com/236x/ab/cd/ef.jpg">"#;
+        let urls = rank_drop_urls(urls_from_payload("text/html", html));
+        assert_eq!(urls[0], "https://i.pinimg.com/originals/ab/cd/ef.jpg");
     }
 
     #[test]

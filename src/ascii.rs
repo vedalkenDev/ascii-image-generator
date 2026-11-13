@@ -11,8 +11,20 @@ const VISOR_RAMP: [[u8; 3]; 6] = [
 ];
 const CREAM_RGB: [u8; 3] = [0xf4, 0xf3, 0xe8];
 const GROUND_RGB: [u8; 3] = [0x05, 0x05, 0x08];
+const CHARCOAL_RGB: [u8; 3] = [0x24, 0x2a, 0x30];
 const AMBER_RGB: [u8; 3] = [0xc1, 0x8d, 0x5d];
 const AMBER_LO: [u8; 3] = [0x18, 0x0e, 0x06];
+pub const DUO_SWATCHES: [[u8; 3]; 9] = [
+    [0x59, 0x2a, 0xa4],
+    [0x42, 0x77, 0xa2],
+    [0x3f, 0xb6, 0xaf],
+    [0x93, 0x9e, 0x7a],
+    [0xc1, 0x8d, 0x5d],
+    [0xd9, 0x63, 0x50],
+    CREAM_RGB,
+    CHARCOAL_RGB,
+    GROUND_RGB,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Charset {
@@ -42,14 +54,16 @@ pub enum ColorKind {
     Visor,
     Amber,
     Cream,
+    Duo,
 }
 
 impl ColorKind {
-    pub const ALL: [ColorKind; 4] = [
+    pub const ALL: [ColorKind; 5] = [
         ColorKind::Source,
         ColorKind::Visor,
         ColorKind::Amber,
         ColorKind::Cream,
+        ColorKind::Duo,
     ];
 
     pub fn name(self) -> &'static str {
@@ -58,8 +72,17 @@ impl ColorKind {
             Self::Visor => "VISOR",
             Self::Amber => "AMBER",
             Self::Cream => "CREAM",
+            Self::Duo => "DUO",
         }
     }
+}
+
+pub fn next_duo_swatch(cur: [u8; 3]) -> [u8; 3] {
+    let i = DUO_SWATCHES
+        .iter()
+        .position(|c| *c == cur)
+        .unwrap_or(0);
+    DUO_SWATCHES[(i + 1) % DUO_SWATCHES.len()]
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -153,6 +176,8 @@ pub struct Settings {
     pub invert: bool,
     pub color: bool,
     pub color_kind: ColorKind,
+    pub duo_ink: [u8; 3],
+    pub duo_paper: [u8; 3],
 }
 
 impl Default for Settings {
@@ -167,6 +192,8 @@ impl Default for Settings {
             invert: false,
             color: true,
             color_kind: ColorKind::Visor,
+            duo_ink: CHARCOAL_RGB,
+            duo_paper: CREAM_RGB,
         }
     }
 }
@@ -265,6 +292,7 @@ fn cell_color(s: &Settings, rgb: [f32; 3], yv: f32) -> [u8; 3] {
         ColorKind::Visor => visor_rgb(yv),
         ColorKind::Amber => amber_rgb(yv),
         ColorKind::Cream => lerp_u8(GROUND_RGB, CREAM_RGB, yv.clamp(0.0, 1.0)),
+        ColorKind::Duo => lerp_u8(s.duo_ink, s.duo_paper, yv.clamp(0.0, 1.0)),
         ColorKind::Source if s.color => to_u8(rgb),
         ColorKind::Source => {
             let g = (yv * 255.0).round() as u8;
@@ -388,6 +416,27 @@ mod tests {
         s.color_kind = ColorKind::Cream;
         let (_, _, cells) = convert(&img, &s);
         assert!(cells.iter().all(|c| c.color == CREAM_RGB));
+    }
+
+    #[test]
+    fn duotone_maps_black_to_ink_white_to_paper() {
+        let black = RgbaImage::from_pixel(20, 20, image::Rgba([0, 0, 0, 255]));
+        let white = RgbaImage::from_pixel(20, 20, image::Rgba([255, 255, 255, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        s.color_kind = ColorKind::Duo;
+        s.duo_ink = [0xd9, 0x63, 0x50];
+        s.duo_paper = CREAM_RGB;
+        let (_, _, dark) = convert(&black, &s);
+        let (_, _, light) = convert(&white, &s);
+        assert!(dark.iter().all(|c| c.color == s.duo_ink));
+        assert!(light.iter().all(|c| c.color == s.duo_paper));
+        Look::Blocks.apply(&mut s);
+        s.color_kind = ColorKind::Duo;
+        let (_, _, cells) = convert(&white, &s);
+        let ramp = s.charset.ramp();
+        assert!(cells.iter().all(|c| ramp.contains(&c.ch)));
+        assert!(cells.iter().all(|c| c.color == s.duo_paper));
     }
 
     #[test]

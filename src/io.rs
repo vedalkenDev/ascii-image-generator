@@ -214,6 +214,15 @@ impl ExportKind {
             Self::Ansi => "ANSI",
         }
     }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Txt | Self::Ansi => "text/plain;charset=utf-8",
+            Self::Svg => "image/svg+xml;charset=utf-8",
+            Self::Html => "text/html;charset=utf-8",
+            Self::Png => "image/png",
+        }
+    }
 }
 
 pub fn to_txt(cols: u32, rows: u32, grid: &[Cell]) -> String {
@@ -501,5 +510,15 @@ mod tests {
         assert!(img.width() <= MAX_SIDE);
         assert!(img.height() <= MAX_SIDE);
         assert_eq!(img.width(), 2048);
+    }
+
+    #[test]
+    fn export_kind_mime_matches_extension() {
+        assert_eq!(ExportKind::Txt.ext(), "txt");
+        assert_eq!(ExportKind::Svg.ext(), "svg");
+        assert_eq!(ExportKind::Ansi.ext(), "ans");
+        assert!(ExportKind::Txt.mime().starts_with("text/plain"));
+        assert!(ExportKind::Svg.mime().starts_with("image/svg+xml"));
+        assert!(ExportKind::Ansi.mime().starts_with("text/plain"));
     }
 }

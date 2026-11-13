@@ -1,6 +1,6 @@
 # Export
 
-Export writes the current theater off the machine: TXT (plain glyph grid), SVG (vector glyphs), ANSI (coloured terminal art), and COPY TXT (clipboard). PNG and HTML encoders exist in the binary but are not in the sidebar.
+Export writes the current theater off the machine: TXT (plain glyph grid), SVG (vector glyphs), ANSI (coloured terminal art), and COPY TXT (clipboard). PNG and HTML encoders exist in the binary but are not in the sidebar. Native asks for a save path. Web sends the file to the browser Downloads folder on the same click — no dialog, no `Exporting…` on **CHOOSE STILL**.
 
 ## Sub-features
 
@@ -12,8 +12,8 @@ Export writes the current theater off the machine: TXT (plain glyph grid), SVG (
 
 ## How to get to it (user POV)
 
-- Choose `TXT`, `SVG`, or `ANSI` under `:: OUT`, then pick a save path in the file dialog.
-- Choose `COPY TXT` (no dialog).
+- Choose `TXT`, `SVG`, or `ANSI` under `:: OUT`. Native: pick a save path. Web: the file appears in Downloads and the sidebar reads `saved <name>.<ext>`.
+- Choose `COPY TXT` (no dialog; sidebar reads `copied`).
 
 ## Driving it with verify-ascii
 
@@ -24,7 +24,8 @@ Preconditions:
 - Save targets are a fresh directory under `$ASCII_VERIFY_DIR` or the evidence `export/` folder. Never overwrite user files.
 
 - **COPY TXT.** Choose `COPY TXT`. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click copy.txt`. Sidebar shows `copied`. Run `wl-paste`. Clipboard is a non-empty glyph grid whose line length matches the plate column count (80 on baseline). Capture `verify-ascii screenshot export-copy`.
-- **TXT via dialog.** Choose `TXT`. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click out.txt`. An rfd save dialog opens (`Exporting…`). Save as `$ASCII_VERIFY_DIR/out.txt`. After dismiss, the file exists, size > 0, row count equals the plate row count, each line's character count equals the plate column count. If the dialog cannot be driven, do **not** skip this bullet: record the dialog as blocking, keep the GUI up, and still run the encode path below as extra evidence — the dialog journey stays unverified, not passed.
+- **TXT via dialog (native).** Choose `TXT`. Run `.cursor/skills/verify-ascii/scripts/verify-ascii click out.txt`. An rfd save dialog opens. **CHOOSE STILL** must still read `CHANGE STILL`, not `Exporting…`. The sage line reads `saved …` after dismiss. Save as `$ASCII_VERIFY_DIR/out.txt`. After dismiss, the file exists, size > 0, row count equals the plate row count, each line's character count equals the plate column count. If the dialog cannot be driven, do **not** skip this bullet: record the dialog as blocking, keep the GUI up, and still run the encode path below as extra evidence — the dialog journey stays unverified, not passed.
+- **TXT download (web).** Choose `TXT`. No save dialog. The browser downloads `<still>.txt`. Sidebar sage line is `saved <still>.txt`. **CHANGE STILL** stays **CHANGE STILL**.
 - **SVG via dialog.** Same as TXT with `click out.svg` and `$ASCII_VERIFY_DIR/out.svg`. File starts with `<svg`, contains glyphs, size > 0.
 - **ANSI via dialog.** Same with `click out.ansi` and `$ASCII_VERIFY_DIR/out.ans`. File contains CSI colour sequences (`ESC[38;2;`) and glyphs, size > 0.
 - **Encode path (extra, same function the dialog calls).** Run `.cursor/skills/verify-ascii/scripts/verify-ascii encode --dir $EVIDENCE/export`. Writes `export-sample.txt`, `export-sample.svg`, `export-sample.ans` (also `.png` and `.html` from the encoder — those two are not sidebar chrome). Each sidebar format file is non-empty.

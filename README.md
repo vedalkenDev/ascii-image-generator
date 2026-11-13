@@ -6,16 +6,16 @@ This is the ASCII generator for [Cosmic Archive](https://vedalken.dev): cream on
 
 ## Download
 
-Built installers live on the [v0.1.0 release](https://github.com/vedalkenDev/ascii-image-generator/releases/tag/v0.1.0):
+Use it in the browser. Same looks, no install, nothing for Gatekeeper to block:
+
+**[vedalkendev.github.io/ascii-image-generator](https://vedalkendev.github.io/ascii-image-generator/)**
+
+Optional unsigned desktop builds are on the [v0.1.0 release](https://github.com/vedalkenDev/ascii-image-generator/releases/tag/v0.1.0):
 
 - [Windows x64 `.exe`](https://github.com/vedalkenDev/ascii-image-generator/releases/download/v0.1.0/Cosmic-Archive-ASCII-windows-x64.exe)
 - [macOS `.dmg`](https://github.com/vedalkenDev/ascii-image-generator/releases/download/v0.1.0/Cosmic-Archive-ASCII-macos.dmg) (Intel and Apple Silicon)
 
-A **web** build of the same app (WebAssembly, same looks catalog) is at [vedalkendev.github.io/ascii-image-generator](https://vedalkendev.github.io/ascii-image-generator/) and avoids the Gatekeeper dialog.
-
-The Windows build is a single unsigned exe. The macOS disk image is **unsigned and not notarized**, so current macOS will show **“Cosmic Archive ASCII.app Not Opened”** / Apple could not verify it. That is Gatekeeper, not a broken app.
-
-To open it:
+The Windows exe is unsigned. The macOS disk image is **unsigned and not notarized**, so current macOS will show **“Cosmic Archive ASCII.app Not Opened”**. That is Gatekeeper, not a broken app. Prefer the web build. To force the Mac app open:
 
 1. Dismiss **Done**.
 2. Open **System Settings → Privacy & Security**, scroll to **Security**.
@@ -72,12 +72,14 @@ File size is not the limit. After decode, the long side is capped at **2048px** 
 
 ## Export
 
-From the sidebar:
+From the sidebar **OUT**:
 
 - **TXT** — plain glyph grid
 - **SVG** — vector glyphs (not a raster of the still)
 - **ANSI** — coloured terminal art
 - **COPY TXT** — the grid on the clipboard
+
+On the web build, TXT / SVG / ANSI go straight to the browser **Downloads** folder (named after the still). There is no save dialog. The sidebar reads `saved still.txt` the same way **COPY TXT** reads `copied`. Desktop still asks where to put the file.
 
 ## License
 

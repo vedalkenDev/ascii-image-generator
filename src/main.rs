@@ -130,7 +130,8 @@ struct App {
     grid_gen: u64,
     source_gen: u64,
     preview: Option<(u64, Vec2, Vec<Arc<Galley>>)>,
-    thumbs: Option<((u64, bool, Mark), Vec<LookThumb>)>,
+    thumbs: Option<((u64, bool, Mark), Arc<Vec<LookThumb>>)>,
+    samples: Option<(u64, u32, Mark, ascii::Samples)>,
     notice: Option<String>,
     out_family: OutFamily,
 }
@@ -161,6 +162,7 @@ impl App {
             source_gen: 0,
             preview: None,
             thumbs: None,
+            samples: None,
             notice: None,
             out_family: OutFamily::Vector,
         };
@@ -206,6 +208,9 @@ impl App {
             return;
         };
         let invert = self.settings.invert;
+        let mut sample_settings = Settings::default();
+        sample_settings.cols = 28;
+        let samples = ascii::sample_image(img, &sample_settings);
         let cards = Look::ALL
             .iter()
             .map(|look| {
@@ -213,7 +218,7 @@ impl App {
                 look.apply(&mut s);
                 s.cols = 28;
                 s.invert = invert;
-                let (cols, rows, grid) = ascii::convert(img, &s);
+                let (cols, rows, grid) = ascii::convert_samples(&samples, &s);
                 LookThumb {
                     look: *look,
                     cols,
@@ -222,12 +227,19 @@ impl App {
                 }
             })
             .collect();
-        self.thumbs = Some((key, cards));
+        self.thumbs = Some((key, Arc::new(cards)));
     }
 
     fn rebuild(&mut self) {
         if let Some(img) = &self.source {
-            let (cols, rows, grid) = ascii::convert(img, &self.settings);
+            let key = (self.source_gen, self.settings.cols, self.settings.mark);
+            if !self.samples.as_ref().is_some_and(|(source, cols, mark, _)| {
+                (*source, *cols, *mark) == key
+            }) {
+                self.samples = Some((key.0, key.1, key.2, ascii::sample_image(img, &self.settings)));
+            }
+            let (_, _, _, samples) = self.samples.as_ref().unwrap();
+            let (cols, rows, grid) = ascii::convert_samples(samples, &self.settings);
             self.cols = cols;
             self.rows = rows;
             self.grid = grid;
@@ -263,7 +275,7 @@ impl App {
             }
         }
         if self.busy.is_some() {
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
@@ -662,7 +674,7 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            self.paint_controls(ui, thumbs.as_deref(), reduced, busy);
+                            self.paint_controls(ui, thumbs.as_deref().map(Vec::as_slice), reduced, busy);
                         });
                 });
         } else {
@@ -675,7 +687,7 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            self.paint_controls(ui, thumbs.as_deref(), reduced, busy);
+                            self.paint_controls(ui, thumbs.as_deref().map(Vec::as_slice), reduced, busy);
                         });
                 });
         }

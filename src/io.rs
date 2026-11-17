@@ -416,9 +416,13 @@ pub(crate) fn mosaic_cells(cols: u32, rows: u32, grid: &[Cell], mark: Mark) -> R
             let px = image::Rgba([cell.color[0], cell.color[1], cell.color[2], 255]);
             let x0 = x * cw;
             let y0 = y * ch;
+            let stride = img.width() as usize * 4;
+            let pixels = img.as_mut();
             for dy in 0..ch {
-                for dx in 0..cw {
-                    img.put_pixel(x0 + dx, y0 + dy, px);
+                let start = (y0 + dy) as usize * stride + x0 as usize * 4;
+                let end = start + cw as usize * 4;
+                for dest in pixels[start..end].chunks_exact_mut(4) {
+                    dest.copy_from_slice(&px.0);
                 }
             }
         }

@@ -212,29 +212,48 @@ pub struct Cell {
     pub color: [u8; 3],
 }
 
-pub fn convert(img: &RgbaImage, s: &Settings) -> (u32, u32, Vec<Cell>) {
+pub struct Samples {
+    pub cols: u32,
+    pub rows: u32,
+    pub rgb: Vec<[f32; 3]>,
+}
+
+pub fn sample_image(img: &RgbaImage, s: &Settings) -> Samples {
     let cols = s.cols.clamp(8, 400);
     let img_aspect = img.width().max(1) as f32 / img.height().max(1) as f32;
     let rows = ((cols as f32 / img_aspect) * s.mark.aspect()).round().max(1.0) as u32;
     let cell_w = img.width() as f32 / cols as f32;
     let cell_h = img.height() as f32 / rows as f32;
-    let ramp = s.charset.ramp();
-    let mut out = Vec::with_capacity((cols * rows) as usize);
+    let mut rgb = Vec::with_capacity((cols as usize) * (rows as usize));
     for y in 0..rows {
         for x in 0..cols {
-            let rgb = enhance(sample(img, x, y, cell_w, cell_h), s);
-            let mut yv = luma(rgb);
-            if s.invert {
-                yv = 1.0 - yv;
-            }
-            let ch = glyph(s, ramp, x, y, yv);
-            out.push(Cell {
-                ch,
-                color: cell_color(s, rgb, yv),
-            });
+            rgb.push(sample(img, x, y, cell_w, cell_h));
         }
     }
-    (cols, rows, out)
+    Samples { cols, rows, rgb }
+}
+
+pub fn convert_samples(samples: &Samples, s: &Settings) -> (u32, u32, Vec<Cell>) {
+    let ramp = s.charset.ramp();
+    let mut out = Vec::with_capacity(samples.rgb.len());
+    for (i, &sampled) in samples.rgb.iter().enumerate() {
+        let x = i as u32 % samples.cols;
+        let y = i as u32 / samples.cols;
+        let rgb = enhance(sampled, s);
+        let mut yv = luma(rgb);
+        if s.invert {
+            yv = 1.0 - yv;
+        }
+        out.push(Cell {
+            ch: glyph(s, ramp, x, y, yv),
+            color: cell_color(s, rgb, yv),
+        });
+    }
+    (samples.cols, samples.rows, out)
+}
+
+pub fn convert(img: &RgbaImage, s: &Settings) -> (u32, u32, Vec<Cell>) {
+    convert_samples(&sample_image(img, s), s)
 }
 
 pub fn ramp_char(ramp: &[char], luma: f32) -> char {

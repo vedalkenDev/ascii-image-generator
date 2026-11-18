@@ -58,27 +58,16 @@ pub enum ColorKind {
 }
 
 impl ColorKind {
-    pub const ALL: [ColorKind; 8] = [
-        ColorKind::Source,
-        ColorKind::Visor,
-        ColorKind::Amber,
-        ColorKind::Cream,
-        ColorKind::Teal,
-        ColorKind::Coral,
-        ColorKind::Sage,
-        ColorKind::Duo,
-    ];
-
     pub fn name(self) -> &'static str {
         match self {
-            Self::Source => "SOURCE",
-            Self::Visor => "VISOR",
-            Self::Amber => "AMBER",
-            Self::Cream => "CREAM",
-            Self::Teal => "TEAL",
-            Self::Coral => "CORAL",
-            Self::Sage => "SAGE",
-            Self::Duo => "DUO",
+            Self::Source => "Source",
+            Self::Visor => "Spectrum",
+            Self::Amber => "Amber",
+            Self::Cream => "Cream",
+            Self::Teal => "Teal",
+            Self::Coral => "Coral",
+            Self::Sage => "Sage",
+            Self::Duo => "Duo",
         }
     }
 }
@@ -92,8 +81,8 @@ pub enum Mark {
 impl Mark {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Cells => "CELLS",
-            Self::Chars => "CHARS",
+            Self::Cells => "Cells",
+            Self::Chars => "Chars",
         }
     }
 
@@ -129,13 +118,13 @@ impl Look {
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Visor => "VISOR",
-            Self::Blocks => "BLOCKS",
-            Self::Crt => "CRT",
-            Self::Ansi => "ANSI",
-            Self::Dither => "DITHER",
-            Self::Hatch => "HATCH",
-            Self::Scan => "SCAN",
+            Self::Visor => "Visor",
+            Self::Blocks => "Blocks",
+            Self::Crt => "Crt",
+            Self::Ansi => "Ansi",
+            Self::Dither => "Dither",
+            Self::Hatch => "Hatch",
+            Self::Scan => "Scan",
         }
     }
 
@@ -171,18 +160,28 @@ impl Look {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Settings {
     pub cols: u32,
     pub charset: Charset,
     pub mark: Mark,
+    pub shade_cells: bool,
+    pub visor_texture: f32,
     pub look: Look,
     pub contrast: f32,
     pub saturation: f32,
     pub brightness: f32,
+    pub tone_brightness: f32,
+    pub tone_contrast: f32,
+    pub tone_gamma: f32,
+    pub auto_levels: bool,
     pub invert: bool,
     pub color: bool,
     pub color_kind: ColorKind,
+    pub filter_strength: f32,
+    pub spectrum_shift: f32,
+    pub spectrum_range: f32,
+    pub spectrum_mix: f32,
     pub duo_ink: [u8; 3],
     pub duo_paper: [u8; 3],
 }
@@ -193,13 +192,23 @@ impl Default for Settings {
             cols: 80,
             charset: Charset::Blocks,
             mark: Mark::Cells,
+            shade_cells: false,
+            visor_texture: 0.65,
             look: Look::Visor,
             contrast: 1.0,
             saturation: 1.0,
             brightness: 0.0,
+            tone_brightness: 0.0,
+            tone_contrast: 1.0,
+            tone_gamma: 1.0,
+            auto_levels: false,
             invert: false,
             color: true,
             color_kind: ColorKind::Visor,
+            filter_strength: 0.0,
+            spectrum_shift: 0.0,
+            spectrum_range: 1.0,
+            spectrum_mix: 0.0,
             duo_ink: CHARCOAL_RGB,
             duo_paper: CREAM_RGB,
         }
@@ -235,21 +244,55 @@ pub fn sample_image(img: &RgbaImage, s: &Settings) -> Samples {
 
 pub fn convert_samples(samples: &Samples, s: &Settings) -> (u32, u32, Vec<Cell>) {
     let ramp = s.charset.ramp();
+    let levels = if s.auto_levels { sample_levels(samples) } else { None };
     let mut out = Vec::with_capacity(samples.rgb.len());
     for (i, &sampled) in samples.rgb.iter().enumerate() {
         let x = i as u32 % samples.cols;
         let y = i as u32 / samples.cols;
-        let rgb = enhance(sampled, s);
+        let sampled = if let Some((low, high)) = levels {
+            sampled.map(|v| ((v - low) / (high - low)).clamp(0.0, 1.0))
+        } else {
+            sampled
+        };
+        let rgb = adjust_tone(enhance(sampled, s), s);
         let mut yv = luma(rgb);
         if s.invert {
             yv = 1.0 - yv;
         }
-        out.push(Cell {
-            ch: glyph(s, ramp, x, y, yv),
-            color: cell_color(s, rgb, yv),
-        });
+        let ch = glyph(s, ramp, x, y, yv);
+        let mut color = cell_color(s, rgb, yv);
+        if s.mark == Mark::Cells && s.shade_cells && ch != ' ' {
+            let coverage = ramp.iter().position(|&value| value == ch)
+                .map(|index| index as f32 / (ramp.len().saturating_sub(1).max(1) as f32))
+                .unwrap_or(1.0);
+            color = lerp_u8(GROUND_RGB, color, coverage);
+        }
+        out.push(Cell { ch, color });
     }
     (samples.cols, samples.rows, out)
+}
+
+fn sample_levels(samples: &Samples) -> Option<(f32, f32)> {
+    if samples.rgb.is_empty() {
+        return None;
+    }
+    let mut histogram = [0usize; 256];
+    for &rgb in &samples.rgb {
+        histogram[(luma(rgb).clamp(0.0, 1.0) * 255.0).round() as usize] += 1;
+    }
+    let n = samples.rgb.len() - 1;
+    let percentile = |rank: usize| {
+        let mut count = 0;
+        for (level, frequency) in histogram.iter().enumerate() {
+            count += frequency;
+            if count > rank { return level; }
+        }
+        255
+    };
+    let low = percentile((n * 2 + 50) / 100);
+    let high = percentile((n * 98 + 50) / 100);
+    if high <= low + 1 { return None; }
+    Some((low as f32 / 255.0, high as f32 / 255.0))
 }
 
 pub fn convert(img: &RgbaImage, s: &Settings) -> (u32, u32, Vec<Cell>) {
@@ -267,6 +310,14 @@ pub fn ramp_char(ramp: &[char], luma: f32) -> char {
 
 fn glyph(s: &Settings, ramp: &[char], x: u32, y: u32, yv: f32) -> char {
     match s.look {
+        Look::Visor if s.visor_texture > 0.0 => {
+            let amount = s.visor_texture.clamp(0.0, 1.0);
+            // The envelope keeps pure black and white stable while adding
+            // ordered texture to the tones between them.
+            let envelope = 4.0 * yv.clamp(0.0, 1.0) * (1.0 - yv.clamp(0.0, 1.0));
+            let offset = (bayer4(x, y) - 7.5 / 16.0) * 0.9 * amount * envelope;
+            ramp_char(ramp, yv + offset)
+        }
         Look::Dither => {
             if yv > bayer4(x, y) {
                 '█'
@@ -345,6 +396,19 @@ fn enhance(rgb: [f32; 3], s: &Settings) -> [f32; 3] {
     c.map(|v| v.clamp(0.0, 1.0))
 }
 
+fn adjust_tone(rgb: [f32; 3], s: &Settings) -> [f32; 3] {
+    // Preserve the old pipeline exactly at the default settings.
+    if s.tone_brightness == 0.0 && s.tone_contrast == 1.0 && s.tone_gamma == 1.0 {
+        return rgb;
+    }
+    let gamma = s.tone_gamma.clamp(0.1, 4.0);
+    rgb.map(|v| {
+        let level = ((v - 0.5) * s.tone_contrast + 0.5 + s.tone_brightness)
+            .clamp(0.0, 1.0);
+        level.powf(1.0 / gamma)
+    })
+}
+
 fn luma(rgb: [f32; 3]) -> f32 {
     0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
@@ -354,8 +418,19 @@ fn to_u8(rgb: [f32; 3]) -> [u8; 3] {
 }
 
 fn cell_color(s: &Settings, rgb: [f32; 3], yv: f32) -> [u8; 3] {
-    match s.color_kind {
-        ColorKind::Visor => visor_rgb(yv),
+    let base = match s.color_kind {
+        ColorKind::Visor => {
+            let position = if s.spectrum_shift == 0.0 && s.spectrum_range == 1.0 {
+                yv
+            } else {
+                ((yv - 0.5) * s.spectrum_range.clamp(0.0, 2.0) + 0.5 + s.spectrum_shift)
+                    .clamp(0.0, 1.0)
+            };
+            let spectrum = visor_rgb(position);
+            if s.spectrum_mix == 0.0 { spectrum } else {
+                lerp_u8(spectrum, to_u8(rgb), s.spectrum_mix)
+            }
+        },
         ColorKind::Amber => phosphor(AMBER_LO, AMBER_RGB, CREAM_RGB, yv),
         ColorKind::Teal => phosphor(TEAL_LO, TEAL_RGB, CREAM_RGB, yv),
         ColorKind::Coral => phosphor(CORAL_LO, CORAL_RGB, CREAM_RGB, yv),
@@ -374,7 +449,17 @@ fn cell_color(s: &Settings, rgb: [f32; 3], yv: f32) -> [u8; 3] {
             let g = (yv * 255.0).round() as u8;
             [g, g, g]
         }
-    }
+    };
+    let strength = s.filter_strength.clamp(0.0, 1.0);
+    if strength == 0.0 { return base; }
+    let y = yv.clamp(0.0, 1.0);
+    let enhanced = match s.color_kind {
+        ColorKind::Cream => lerp_u8(GROUND_RGB, CREAM_RGB, y.sqrt()),
+        ColorKind::Teal => lerp_u8(TEAL_LO, TEAL_RGB, y),
+        ColorKind::Coral => lerp_u8(CORAL_LO, CORAL_RGB, y),
+        _ => return base,
+    };
+    lerp_u8(base, enhanced, strength)
 }
 
 fn visor_rgb(y: f32) -> [u8; 3] {
@@ -409,6 +494,179 @@ fn lerp_u8(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spectrum_controls_change_colours_without_changing_glyphs() {
+        let img = RgbaImage::from_pixel(32, 32, image::Rgba([180, 100, 40, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        let (_, _, baseline) = convert(&img, &s);
+        s.spectrum_shift = 0.3;
+        let (_, _, shifted) = convert(&img, &s);
+        assert_ne!(baseline[0].color, shifted[0].color);
+        assert!(baseline.iter().zip(&shifted).all(|(a, b)| a.ch == b.ch));
+        s.spectrum_shift = 0.0;
+        s.spectrum_range = 0.0;
+        let (_, _, narrowed) = convert(&img, &s);
+        assert_ne!(baseline[0].color, narrowed[0].color);
+        s.spectrum_range = 1.0;
+        s.spectrum_mix = 1.0;
+        let (_, _, mixed) = convert(&img, &s);
+        assert_eq!(mixed[0].color, [180, 100, 40]);
+        s.look = Look::Blocks;
+        let (_, _, other_look) = convert(&img, &s);
+        assert_eq!(other_look[0].color, mixed[0].color);
+    }
+
+    #[test]
+    fn visor_default_is_visibly_distinct_from_blocks_with_the_same_colour() {
+        let img = RgbaImage::from_pixel(32, 32, image::Rgba([100, 100, 100, 255]));
+        let mut s = Settings::default();
+        s.cols = 16;
+        s.color_kind = ColorKind::Source;
+        let (_, _, visor) = convert(&img, &s);
+        s.look = Look::Blocks;
+        let (_, _, blocks) = convert(&img, &s);
+        assert!(visor.iter().zip(&blocks).any(|(a, b)| (a.ch == ' ') != (b.ch == ' ')));
+    }
+
+    #[test]
+    fn visor_texture_changes_midtones_only_for_the_visor_look() {
+        let img = RgbaImage::from_pixel(32, 32, image::Rgba([128, 128, 128, 255]));
+        let mut s = Settings::default();
+        s.cols = 16;
+        s.color_kind = ColorKind::Source;
+        s.visor_texture = 0.0;
+        let (_, _, plain) = convert(&img, &s);
+        s.visor_texture = 1.0;
+        let (_, _, textured) = convert(&img, &s);
+        assert!(textured.iter().zip(&plain).any(|(a, b)| a.ch != b.ch));
+        assert!(textured.iter().zip(&plain).all(|(a, b)| a.color == b.color));
+        s.look = Look::Blocks;
+        let (_, _, blocks_with_texture) = convert(&img, &s);
+        s.visor_texture = 0.0;
+        let (_, _, blocks_plain) = convert(&img, &s);
+        assert_eq!(blocks_with_texture.iter().map(|c| c.ch).collect::<Vec<_>>(), blocks_plain.iter().map(|c| c.ch).collect::<Vec<_>>());
+        let white = RgbaImage::from_pixel(32, 32, image::Rgba([255, 255, 255, 255]));
+        s.look = Look::Visor;
+        s.visor_texture = 1.0;
+        let (_, _, white_cells) = convert(&white, &s);
+        assert!(white_cells.iter().all(|c| c.ch == '█'));
+    }
+
+    #[test]
+    fn neutral_adjustments_match_legacy_output_across_looks() {
+        let image = RgbaImage::from_fn(32, 24, |x, y| {
+            image::Rgba([(x * 8) as u8, (y * 10) as u8, ((x + y) * 4) as u8, 255])
+        });
+        for look in Look::ALL {
+            for mark in [Mark::Cells, Mark::Chars] {
+                let mut s = Settings::default();
+                look.apply(&mut s);
+                s.cols = 16;
+                s.mark = mark;
+                s.visor_texture = 0.0;
+                let (cols, rows, grid) = convert(&image, &s);
+                let cw = image.width() as f32 / cols as f32;
+                let ch = image.height() as f32 / rows as f32;
+                for y in 0..rows {
+                    for x in 0..cols {
+                        let rgb = enhance(sample(&image, x, y, cw, ch), &s);
+                        let yv = luma(rgb);
+                        let cell = grid[(y * cols + x) as usize];
+                        assert_eq!(cell.ch, glyph(&s, s.charset.ramp(), x, y, yv));
+                        assert_eq!(cell.color, cell_color(&s, rgb, yv));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn auto_levels_ignores_isolated_extreme_samples() {
+        let mut rgb = vec![[80.0 / 255.0; 3]; 49];
+        rgb.extend(vec![[160.0 / 255.0; 3]; 49]);
+        rgb.push([0.0; 3]);
+        rgb.push([1.0; 3]);
+        let samples = Samples { cols: 10, rows: 10, rgb };
+        let (low, high) = sample_levels(&samples).unwrap();
+        assert!((low - 80.0 / 255.0).abs() < 0.001);
+        assert!((high - 160.0 / 255.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn shaded_cells_add_glyph_density_without_changing_char_output() {
+        let image = RgbaImage::from_pixel(20, 20, image::Rgba([100, 100, 100, 255]));
+        let mut s = Settings::default();
+        s.cols = 8;
+        s.visor_texture = 0.0;
+        s.color_kind = ColorKind::Source;
+        let (_, _, solid) = convert(&image, &s);
+        s.shade_cells = true;
+        let (_, _, shaded) = convert(&image, &s);
+        assert_eq!(solid[0].ch, shaded[0].ch);
+        assert!(shaded[0].color[0] < solid[0].color[0]);
+        s.mark = Mark::Chars;
+        let (_, _, chars_shaded) = convert(&image, &s);
+        s.shade_cells = false;
+        let (_, _, chars_solid) = convert(&image, &s);
+        assert_eq!(chars_shaded.iter().map(|c| (c.ch, c.color)).collect::<Vec<_>>(), chars_solid.iter().map(|c| (c.ch, c.color)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn filter_strength_preserves_defaults_and_restores_highlight_tint() {
+        let white = [1.0; 3];
+        let mut s = Settings::default();
+        s.color_kind = ColorKind::Teal;
+        assert_eq!(cell_color(&s, white, 1.0), CREAM_RGB);
+        s.filter_strength = 1.0;
+        assert_eq!(cell_color(&s, white, 1.0), TEAL_RGB);
+        s.color_kind = ColorKind::Coral;
+        assert_eq!(cell_color(&s, white, 1.0), CORAL_RGB);
+        s.color_kind = ColorKind::Cream;
+        let stronger = cell_color(&s, [0.25; 3], 0.25);
+        s.filter_strength = 0.0;
+        let baseline = cell_color(&s, [0.25; 3], 0.25);
+        assert!(stronger[0] > baseline[0]);
+        s.color_kind = ColorKind::Source;
+        s.filter_strength = 1.0;
+        assert_eq!(cell_color(&s, white, 1.0), [255; 3]);
+    }
+
+    #[test]
+    fn auto_levels_expands_low_contrast_but_leaves_flat_images_alone() {
+        let mut img = RgbaImage::from_pixel(20, 20, image::Rgba([80, 80, 80, 255]));
+        for y in 0..20 { for x in 10..20 { img.put_pixel(x, y, image::Rgba([160, 160, 160, 255])); } }
+        let mut s = Settings::default();
+        s.cols = 8;
+        s.color_kind = ColorKind::Source;
+        let (_, _, before) = convert(&img, &s);
+        s.auto_levels = true;
+        let (_, _, after) = convert(&img, &s);
+        let span = |cells: &[Cell]| cells.iter().map(|c| c.color[0]).max().unwrap() - cells.iter().map(|c| c.color[0]).min().unwrap();
+        assert!(span(&after) > span(&before));
+        let flat = RgbaImage::from_pixel(20, 20, image::Rgba([100, 100, 100, 255]));
+        let (_, _, on) = convert(&flat, &s);
+        s.auto_levels = false;
+        let (_, _, off) = convert(&flat, &s);
+        assert_eq!(on.iter().map(|c| (c.ch, c.color)).collect::<Vec<_>>(), off.iter().map(|c| (c.ch, c.color)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn tone_controls_lift_and_separate_midtone_values() {
+        let mut s = Settings::default();
+        let original = [0.25, 0.25, 0.25];
+        assert_eq!(adjust_tone(original, &s), original);
+        s.tone_brightness = 0.1;
+        assert!(adjust_tone(original, &s)[0] > original[0]);
+        s.tone_brightness = 0.0;
+        s.tone_gamma = 2.0;
+        assert!(adjust_tone(original, &s)[0] > original[0]);
+        s.tone_gamma = 1.0;
+        s.tone_contrast = 1.5;
+        assert!(adjust_tone(original, &s)[0] < original[0]);
+        assert!(adjust_tone([0.75; 3], &s)[0] > 0.75);
+    }
 
     #[test]
     fn ramp_maps_ends() {

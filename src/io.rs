@@ -213,13 +213,13 @@ impl ExportKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Txt => "TXT",
-            Self::Png => "PNG",
-            Self::Jpeg => "JPEG",
-            Self::Webp => "WEBP",
-            Self::Svg => "SVG",
-            Self::Html => "HTML",
-            Self::Ansi => "ANSI",
+            Self::Txt => "Txt",
+            Self::Png => "Png",
+            Self::Jpeg => "Jpeg",
+            Self::Webp => "Webp",
+            Self::Svg => "Svg",
+            Self::Html => "Html",
+            Self::Ansi => "Ansi",
         }
     }
 
@@ -1025,6 +1025,51 @@ mod tests {
             painted > 100,
             "CHARS raster should paint glyphs, got {painted} lit pixels"
         );
+    }
+
+    #[test]
+    fn visor_texture_and_spectrum_export_the_rendered_cell_colours() {
+        let image = RgbaImage::from_fn(32, 32, |x, y| {
+            image::Rgba([(x * 7 + 30) as u8, (y * 6 + 40) as u8, 100, 255])
+        });
+        let mut settings = crate::ascii::Settings::default();
+        settings.cols = 8;
+        settings.visor_texture = 0.8;
+        settings.spectrum_shift = 0.25;
+        settings.spectrum_range = 0.7;
+        settings.spectrum_mix = 0.4;
+        let (cols, rows, grid) = crate::ascii::convert(&image, &settings);
+        let svg = to_svg(cols, rows, &grid, Mark::Cells);
+        let png = image::load_from_memory(&to_png(cols, rows, &grid, Mark::Cells).unwrap())
+            .unwrap().to_rgba8();
+        let (cw, ch) = cell_px(cols, rows, Mark::Cells);
+        for y in 0..rows {
+            for x in 0..cols {
+                let cell = grid[(y * cols + x) as usize];
+                let expected = if cell.ch == ' ' { [5, 5, 8] } else { cell.color };
+                assert_eq!(png.get_pixel(x * cw + cw / 2, y * ch + ch / 2).0, [expected[0], expected[1], expected[2], 255]);
+                if cell.ch != ' ' {
+                    assert!(svg.contains(&format!("fill=\"#{:02x}{:02x}{:02x}\"", cell.color[0], cell.color[1], cell.color[2])));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shaded_cells_export_the_same_grid_colour_in_svg_and_png() {
+        let image = RgbaImage::from_pixel(20, 20, image::Rgba([100, 100, 100, 255]));
+        let mut settings = crate::ascii::Settings::default();
+        settings.cols = 8;
+        settings.visor_texture = 0.0;
+        settings.color_kind = crate::ascii::ColorKind::Source;
+        settings.shade_cells = true;
+        let (cols, rows, grid) = crate::ascii::convert(&image, &settings);
+        let color = grid[0].color;
+        let svg = to_svg(cols, rows, &grid, Mark::Cells);
+        assert!(svg.contains(&format!("fill=\"#{:02x}{:02x}{:02x}\"", color[0], color[1], color[2])));
+        let encoded = to_png(cols, rows, &grid, Mark::Cells).unwrap();
+        let decoded = image::load_from_memory(&encoded).unwrap().to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0, [color[0], color[1], color[2], 255]);
     }
 
     #[test]

@@ -81,12 +81,26 @@ fn main() {
     });
 }
 
+/// What a cached Chars mesh depends on. Glyph UVs point into egui's font
+/// atlas, which grows as new sizes rasterize and is rebuilt (fill drops) when
+/// nearly full or when the display scale changes.
+#[derive(Clone, Copy, PartialEq)]
+struct PreviewKey {
+    grid_gen: u64,
+    rect: Rect,
+    ppp: f32,
+    atlas_size: [usize; 2],
+    atlas_fill: f32,
+}
+
 #[derive(Clone)]
 struct LookThumb {
     look: Look,
     cols: u32,
     rows: u32,
     grid: Vec<Cell>,
+    /// Cells thumbnails upload once as a texture instead of hundreds of rects per frame.
+    mosaic: Option<egui::TextureHandle>,
 }
 
 struct App {
@@ -101,14 +115,18 @@ struct App {
     dirty: bool,
     error: Option<String>,
     reduced_motion: bool,
+    motion_checked_at: f64,
     jobs_tx: Sender<Job>,
     jobs_rx: Receiver<Job>,
     busy: Option<&'static str>,
     grid_gen: u64,
     source_gen: u64,
-    preview: Option<(u64, Vec2, Vec<Arc<Galley>>)>,
+    preview: Option<(PreviewKey, Arc<egui::Mesh>)>,
+    mosaic: Option<(u64, egui::TextureHandle)>,
     thumbs: Option<((u64, Settings), Arc<Vec<LookThumb>>)>,
     samples: Option<(u64, u32, Mark, ascii::Samples)>,
+    /// Thumbnails sample at a fixed 28 columns, so only the still and mark change them.
+    thumb_samples: Option<(u64, Mark, ascii::Samples)>,
     notice: Option<String>,
 }
 
@@ -143,14 +161,17 @@ impl App {
             dirty: false,
             error: None,
             reduced_motion: reduced_motion(&cc.egui_ctx),
+            motion_checked_at: 0.0,
             jobs_tx,
             jobs_rx,
             busy: None,
             grid_gen: 0,
             source_gen: 0,
             preview: None,
+            mosaic: None,
             thumbs: None,
             samples: None,
+            thumb_samples: None,
             notice: None,
         };
         #[cfg(target_arch = "wasm32")]
@@ -164,7 +185,7 @@ impl App {
     }
 
     fn set_source(&mut self, img: RgbaImage, name: String, _ctx: &egui::Context) {
-        self.source = Some(img);
+        self.source = Some(ascii::working_copy(img));
         self.source_name = name;
         self.error = None;
         self.notice = None;
@@ -184,7 +205,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn ensure_thumbs(&mut self) {
+    fn ensure_thumbs(&mut self, ctx: &egui::Context) {
         let mut thumbnail_state = self.settings;
         thumbnail_state.cols = 28;
         let key = (self.source_gen, thumbnail_state);
@@ -199,17 +220,24 @@ impl App {
             self.thumbs = None;
             return;
         };
-        let samples = ascii::sample_image(img, &thumbnail_state);
+        let skey = (self.source_gen, thumbnail_state.mark);
+        if !self.thumb_samples.as_ref().is_some_and(|(g, m, _)| (*g, *m) == skey) {
+            self.thumb_samples = Some((skey.0, skey.1, ascii::sample_image(img, &thumbnail_state)));
+        }
+        let samples = &self.thumb_samples.as_ref().unwrap().2;
         let cards = Look::ALL
             .iter()
             .map(|look| {
                 let s = thumbnail_settings(&thumbnail_state, *look);
-                let (cols, rows, grid) = ascii::convert_samples(&samples, &s);
+                let (cols, rows, grid) = ascii::convert_samples(samples, &s);
+                let mosaic = (s.mark == Mark::Cells)
+                    .then(|| mosaic_texture(ctx, "thumb", cols, rows, &grid));
                 LookThumb {
                     look: *look,
                     cols,
                     rows,
                     grid,
+                    mosaic,
                 }
             })
             .collect();
@@ -666,14 +694,19 @@ impl eframe::App for App {
         self.poll_drops(ctx);
         // wasm drop-decode is sync, so a second drain picks up Loaded this frame.
         self.poll_jobs(ctx);
-        self.reduced_motion = reduced_motion(ctx);
+        // The OS setting rarely changes; poll it once a second, not every frame.
+        let now = ctx.input(|i| i.time);
+        if now - self.motion_checked_at > 1.0 {
+            self.reduced_motion = reduced_motion(ctx);
+            self.motion_checked_at = now;
+        }
         if self.dirty {
             self.rebuild();
         }
         let reduced = self.reduced_motion;
         let busy = self.busy;
         let narrow = ctx.screen_rect().width() < 760.0;
-        self.ensure_thumbs();
+        self.ensure_thumbs(ctx);
         let thumbs = self.thumbs.as_ref().map(|(_, cards)| cards.clone());
         let chrome = Frame::new()
             .fill(GROUND)
@@ -1445,7 +1478,10 @@ fn look_card(
     ui.painter()
         .rect_filled(preview, 0, Color32::from_rgb(0x08, 0x09, 0x0c));
     if let Some(thumb) = thumb {
-        paint_grid(ui, preview, thumb.cols, thumb.rows, &thumb.grid, mark);
+        match &thumb.mosaic {
+            Some(tex) => paint_texture(ui, preview, tex),
+            None => paint_grid(ui, preview, thumb.cols, thumb.rows, &thumb.grid, mark),
+        }
     } else {
         ui.painter().text(
             preview.center(),
@@ -1478,29 +1514,41 @@ fn paint_preview(ui: &egui::Ui, rect: Rect, app: &mut App) {
         return;
     }
     if app.settings.mark == Mark::Cells {
-        paint_mosaic(ui, rect, app.cols, app.rows, &app.grid);
+        if !app.mosaic.as_ref().is_some_and(|(gen, _)| *gen == app.grid_gen) {
+            let tex = mosaic_texture(ui.ctx(), "preview", app.cols, app.rows, &app.grid);
+            app.mosaic = Some((app.grid_gen, tex));
+        }
+        if let Some((_, tex)) = &app.mosaic {
+            paint_texture(ui, rect, tex);
+        }
         return;
     }
-    let size = rect.size();
-    let miss = match &app.preview {
-        Some((gen, cached, _)) => *gen != app.grid_gen || (cached.x - size.x).abs() > 0.5,
-        None => true,
+    let ctx = ui.ctx();
+    let (atlas_size, atlas_fill) = ctx.fonts(|f| (f.font_image_size(), f.font_atlas_fill_ratio()));
+    let key = PreviewKey {
+        grid_gen: app.grid_gen,
+        rect,
+        ppp: ctx.pixels_per_point(),
+        atlas_size,
+        atlas_fill,
     };
-    if miss {
-        let galleys = layout_cells(ui, rect, app.cols, app.rows, &app.grid);
-        app.preview = Some((app.grid_gen, size, galleys));
+    let hit = app.preview.as_ref().is_some_and(|(k, _)| {
+        k.grid_gen == key.grid_gen
+            && k.ppp == key.ppp
+            && k.atlas_size == key.atlas_size
+            && key.atlas_fill >= k.atlas_fill
+            && (k.rect.min - rect.min).length() < 0.5
+            && (k.rect.size() - rect.size()).length() < 0.5
+    });
+    if !hit {
+        let mesh = glyph_mesh(ui, rect, app.cols, app.rows, &app.grid);
+        app.preview = Some((key, Arc::new(mesh)));
+        // New glyphs may grow the atlas later this frame; one more frame
+        // re-checks the key and rebuilds if the UVs went stale.
+        ctx.request_repaint();
     }
-    if let Some((_, _, galleys)) = &app.preview {
-        let gh = rect.height() / app.rows as f32;
-        let painter = ui.painter_at(rect);
-        let ppp = ui.ctx().pixels_per_point();
-        for (y, galley) in galleys.iter().enumerate() {
-            let pos = Pos2::new(
-                (rect.left() * ppp).round() / ppp,
-                ((rect.top() + y as f32 * gh) * ppp).round() / ppp,
-            );
-            painter.galley(pos, galley.clone(), CREAM);
-        }
+    if let Some((_, mesh)) = &app.preview {
+        ui.painter_at(rect).add(egui::Shape::Mesh(mesh.clone()));
     }
 }
 
@@ -1509,9 +1557,12 @@ fn paint_grid(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell], ma
         return;
     }
     if mark == Mark::Cells {
-        paint_mosaic(ui, rect, cols, rows, grid);
+        let tex = mosaic_texture(ui.ctx(), "grid", cols, rows, grid);
+        paint_texture(ui, rect, &tex);
         return;
     }
+    // Thumbnails are tiny and rebuilt every frame: plain galleys keep their
+    // font-atlas UVs valid without any cache bookkeeping.
     let galleys = layout_cells(ui, rect, cols, rows, grid);
     let font_size = rect.height() / rows as f32;
     let painter = ui.painter_at(rect);
@@ -1521,37 +1572,99 @@ fn paint_grid(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell], ma
     }
 }
 
-fn paint_mosaic(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) {
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0, GROUND);
+/// One texel per cell; nearest filtering keeps hard cell edges at any zoom.
+fn mosaic_texture(ctx: &egui::Context, name: &str, cols: u32, rows: u32, grid: &[Cell]) -> egui::TextureHandle {
+    let (w, h) = (cols.max(1) as usize, rows.max(1) as usize);
+    let mut pixels = vec![GROUND; w * h];
+    for (px, cell) in pixels.iter_mut().zip(grid) {
+        if cell.ch != ' ' {
+            *px = Color32::from_rgb(cell.color[0], cell.color[1], cell.color[2]);
+        }
+    }
+    ctx.load_texture(
+        name,
+        egui::ColorImage::new([w, h], pixels),
+        egui::TextureOptions::NEAREST,
+    )
+}
+
+fn paint_texture(ui: &egui::Ui, rect: Rect, tex: &egui::TextureHandle) {
+    ui.painter_at(rect).image(
+        tex.id(),
+        rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+/// Chars mode as one mesh. The font is monospace, so each ramp glyph is laid
+/// out once and its quad stamped per cell: no text shaping of the whole grid.
+fn glyph_mesh(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) -> egui::Mesh {
+    let painter = ui.painter();
     let ppp = ui.ctx().pixels_per_point();
     let snap = |v: f32| (v * ppp).round() / ppp;
-    let w = rect.width();
-    let h = rect.height();
+    let gw = rect.width() / cols as f32;
+    let gh = rect.height() / rows as f32;
+    let mut font_size = gh;
+    let probe = painter.layout_no_wrap("█".to_owned(), FontId::monospace(font_size), Color32::WHITE);
+    if probe.size().x > gw && probe.size().x > 0.0 {
+        font_size *= gw / probe.size().x;
+    }
+    let font = FontId::monospace(font_size);
+    let advance = painter
+        .layout_no_wrap("█".to_owned(), font.clone(), Color32::WHITE)
+        .size()
+        .x;
+    // Per glyph: its mesh relative to the cell origin, laid out once.
+    let mut stamps: Vec<(char, egui::Mesh)> = Vec::new();
+    let mut mesh = egui::Mesh::default();
+    let left = snap(rect.left());
     for y in 0..rows {
-        let y0 = snap(rect.top() + (y as f32 / rows as f32) * h);
-        let y1 = snap(rect.top() + ((y + 1) as f32 / rows as f32) * h);
-        for x in 0..cols {
-            let idx = (y * cols + x) as usize;
-            if idx >= grid.len() {
-                continue;
-            }
-            let cell = grid[idx];
+        let top = snap(rect.top() + y as f32 * gh);
+        let row = (y * cols) as usize;
+        for x in 0..cols as usize {
+            let Some(cell) = grid.get(row + x) else { break };
             if cell.ch == ' ' {
                 continue;
             }
-            let x0 = snap(rect.left() + (x as f32 / cols as f32) * w);
-            let x1 = snap(rect.left() + ((x + 1) as f32 / cols as f32) * w);
-            if x1 <= x0 || y1 <= y0 {
+            let i = match stamps.iter().position(|(c, _)| *c == cell.ch) {
+                Some(i) => i,
+                None => {
+                    let g = painter.layout_no_wrap(cell.ch.to_string(), font.clone(), Color32::WHITE);
+                    let mut stamp = egui::Mesh::default();
+                    for placed in &g.rows {
+                        let mut m = placed.row.visuals.mesh.clone();
+                        m.translate(placed.pos.to_vec2());
+                        stamp.append(m);
+                    }
+                    stamps.push((cell.ch, stamp));
+                    stamps.len() - 1
+                }
+            };
+            let stamp = &stamps[i].1;
+            if stamp.vertices.is_empty() {
                 continue;
             }
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
-                0,
-                Color32::from_rgb(cell.color[0], cell.color[1], cell.color[2]),
-            );
+            mesh.texture_id = stamp.texture_id;
+            let origin = Vec2::new(left + snap(x as f32 * advance), top);
+            let color = Color32::from_rgb(cell.color[0], cell.color[1], cell.color[2]);
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.extend(stamp.vertices.iter().map(|v| egui::epaint::Vertex {
+                pos: v.pos + origin,
+                color,
+                uv: v.uv,
+            }));
+            mesh.indices.extend(stamp.indices.iter().map(|i| base + i));
         }
     }
+    // Galley meshes keep UVs in atlas texels; the tessellator normalizes text
+    // but not raw meshes, so do it here.
+    let [aw, ah] = ui.ctx().fonts(|f| f.font_image_size());
+    let norm = Vec2::new(1.0 / aw as f32, 1.0 / ah as f32);
+    for v in &mut mesh.vertices {
+        v.uv = Pos2::new(v.uv.x * norm.x, v.uv.y * norm.y);
+    }
+    mesh
 }
 
 fn layout_cells(
@@ -2204,5 +2317,106 @@ mod drop_url_tests {
             still_name_from_url("https://i.pinimg.com/originals/ab/cd/ef.jpg?foo=1"),
             "ef.jpg"
         );
+    }
+}
+
+#[cfg(test)]
+mod perf_bench {
+    use super::*;
+    use std::time::Instant;
+
+    fn photo(w: u32, h: u32) -> RgbaImage {
+        RgbaImage::from_fn(w, h, |x, y| {
+            let n = (x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503)) % 64;
+            image::Rgba([((x * 255) / w) as u8, ((y * 255) / h) as u8, (n * 3) as u8, 255])
+        })
+    }
+
+    fn frame_ms(ctx: &egui::Context, mut paint: impl FnMut(&egui::Ui, Rect)) -> f64 {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+            ..Default::default()
+        };
+        let t = Instant::now();
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(1200.0, 900.0));
+                paint(ui, r);
+            });
+        });
+        let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+        t.elapsed().as_secs_f64() * 1000.0
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_pipeline() {
+        let img = ascii::working_copy(photo(4000, 3000));
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        for cols in [80u32, 200, 400] {
+            for mark in [Mark::Cells, Mark::Chars] {
+                let mut s = Settings::default();
+                Look::Visor.apply(&mut s);
+                s.cols = cols;
+                s.mark = mark;
+                let t = Instant::now();
+                let samples = ascii::sample_image(&img, &s);
+                let sample_ms = t.elapsed().as_secs_f64() * 1000.0;
+                let t = Instant::now();
+                let (c, r, grid) = ascii::convert_samples(&samples, &s);
+                let convert_ms = t.elapsed().as_secs_f64() * 1000.0;
+                // first frame (layout) and steady frame (cached)
+                let mut cache: Option<Arc<egui::Mesh>> = None;
+                let mut tex: Option<egui::TextureHandle> = None;
+                let mut draw = |ui: &egui::Ui, rect: Rect| {
+                    if mark == Mark::Cells {
+                        let tex = tex.get_or_insert_with(|| mosaic_texture(ui.ctx(), "bench", c, r, &grid));
+                        paint_texture(ui, rect, tex);
+                    } else {
+                        let m = cache.get_or_insert_with(|| Arc::new(glyph_mesh(ui, rect, c, r, &grid)));
+                        ui.painter().add(egui::Shape::Mesh(m.clone()));
+                    }
+                };
+                let first = frame_ms(&ctx, &mut draw);
+                let steady = (0..5).map(|_| frame_ms(&ctx, &mut draw)).sum::<f64>() / 5.0;
+                println!(
+                    "cols {cols:>3} {:>5}: {}x{} sample {sample_ms:6.2}ms convert {convert_ms:6.2}ms frame1 {first:7.2}ms steady {steady:7.2}ms",
+                    if mark == Mark::Cells { "cells" } else { "chars" }, c, r
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod glyph_mesh_tests {
+    use super::*;
+
+    #[test]
+    fn glyph_mesh_stamps_one_glyph_per_inked_cell() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let grid: Vec<Cell> = (0..12)
+            .map(|i| Cell { ch: if i % 3 == 0 { ' ' } else { '█' }, color: [200, 10, 10] })
+            .collect();
+        let mut info = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(240.0, 60.0));
+                let m = glyph_mesh(ui, rect, 4, 3, &grid);
+                let b = m.calc_bounds();
+                assert!(m.vertices.iter().all(|v| (0.0..=1.0).contains(&v.uv.x) && (0.0..=1.0).contains(&v.uv.y)), "uvs normalized");
+                info = Some((m.vertices.len(), m.indices.len(), m.is_valid(), b, m.vertices.first().map(|v| v.color)));
+            });
+        });
+        let (v, i, valid, bounds, color) = info.unwrap();
+        println!("verts {v} idx {i} valid {valid} bounds {bounds:?} color {color:?}");
+        assert!(valid && v >= 8 * 4 && i >= 8 * 6);
+        // Glyphs are narrower than the 60pt cell box (same as galley layout).
+        assert!(bounds.width() > 30.0 && bounds.height() > 30.0);
+        let uv_max = ctx.fonts(|f| f.font_image_size());
+        assert!(uv_max[0] > 1, "atlas size {uv_max:?}");
+        assert_eq!(color, Some(Color32::from_rgb(200, 10, 10)));
     }
 }

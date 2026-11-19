@@ -220,6 +220,37 @@ pub struct Samples {
     pub rgb: Vec<[f32; 3]>,
 }
 
+/// Longest edge kept for sampling. Detail tops out at 400 columns, so a
+/// larger still only costs memory bandwidth on every settings change.
+pub const WORKING_EDGE: u32 = 2048;
+
+/// Halve the still with alpha-weighted 2x2 boxes until it fits WORKING_EDGE.
+/// Weighting by alpha keeps each cell's premultiplied average unchanged.
+pub fn working_copy(mut img: RgbaImage) -> RgbaImage {
+    while img.width().max(img.height()) > WORKING_EDGE && img.width() >= 2 && img.height() >= 2 {
+        let (w, h) = (img.width() / 2, img.height() / 2);
+        let src = img.as_raw();
+        let stride = img.width() as usize * 4;
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            let r0 = &src[2 * y * stride..];
+            let r1 = &src[(2 * y + 1) * stride..];
+            for x in 0..w as usize {
+                let px = [&r0[8 * x..], &r0[8 * x + 4..], &r1[8 * x..], &r1[8 * x + 4..]];
+                let a: u32 = px.iter().map(|p| p[3] as u32).sum();
+                let o = &mut out[(y * w as usize + x) * 4..][..4];
+                for c in 0..3 {
+                    let v: u32 = px.iter().map(|p| p[c] as u32 * p[3] as u32).sum();
+                    o[c] = if a == 0 { 0 } else { ((v + a / 2) / a) as u8 };
+                }
+                o[3] = ((a + 2) / 4) as u8;
+            }
+        }
+        img = RgbaImage::from_raw(w, h, out).expect("buffer sized to w*h*4");
+    }
+    img
+}
+
 pub fn sample_image(img: &RgbaImage, s: &Settings) -> Samples {
     let cols = s.cols.clamp(8, 400);
     let img_aspect = img.width().max(1) as f32 / img.height().max(1) as f32;
@@ -288,6 +319,7 @@ fn sample_levels(samples: &Samples) -> Option<(f32, f32)> {
     Some((low as f32 / 255.0, high as f32 / 255.0))
 }
 
+#[cfg(test)]
 pub fn convert(img: &RgbaImage, s: &Settings) -> (u32, u32, Vec<Cell>) {
     convert_samples(&sample_image(img, s), s)
 }
@@ -353,28 +385,30 @@ fn sample(img: &RgbaImage, cx: u32, cy: u32, cw: f32, ch: f32) -> [f32; 3] {
     let y0 = (cy as f32 * ch) as u32;
     let x1 = (((cx + 1) as f32 * cw) as u32).min(img.width()).max(x0 + 1);
     let y1 = (((cy + 1) as f32 * ch) as u32).min(img.height()).max(y0 + 1);
-    let sx = ((x1 - x0) / 4).max(1);
-    let sy = ((y1 - y0) / 4).max(1);
-    let mut acc = [0.0f32; 3];
-    let mut n = 0.0;
-    let mut y = y0;
-    while y < y1 {
-        let mut x = x0;
-        while x < x1 {
-            let p = img.get_pixel(x, y).0;
-            let a = p[3] as f32 / 255.0;
-            acc[0] += p[0] as f32 / 255.0 * a;
-            acc[1] += p[1] as f32 / 255.0 * a;
-            acc[2] += p[2] as f32 / 255.0 * a;
-            n += 1.0;
-            x += sx;
+    let sx = ((x1 - x0) / 4).max(1) as usize;
+    let sy = ((y1 - y0) / 4).max(1) as usize;
+    // Index the raw buffer directly: get_pixel bounds-checks every read.
+    let raw: &[u8] = img.as_raw();
+    let stride = img.width() as usize * 4;
+    // Integer premultiplied sums: one divide per cell instead of four per pixel.
+    let mut acc = [0u32; 3];
+    let mut n = 0u32;
+    for y in (y0 as usize..y1 as usize).step_by(sy) {
+        let row = &raw[y * stride..(y + 1) * stride];
+        for x in (x0 as usize..x1 as usize).step_by(sx) {
+            let p = &row[x * 4..x * 4 + 4];
+            let a = p[3] as u32;
+            acc[0] += p[0] as u32 * a;
+            acc[1] += p[1] as u32 * a;
+            acc[2] += p[2] as u32 * a;
+            n += 1;
         }
-        y += sy;
     }
-    if n == 0.0 {
+    if n == 0 {
         return [0.0; 3];
     }
-    [acc[0] / n, acc[1] / n, acc[2] / n]
+    let scale = 1.0 / (n as f32 * 255.0 * 255.0);
+    acc.map(|v| v as f32 * scale)
 }
 
 fn enhance(rgb: [f32; 3], s: &Settings) -> [f32; 3] {
@@ -679,6 +713,25 @@ mod tests {
         s.tone_contrast = 1.5;
         assert!(adjust_tone(original, &s)[0] < original[0]);
         assert!(adjust_tone([0.75; 3], &s)[0] > 0.75);
+    }
+
+    #[test]
+    fn working_copy_caps_size_and_keeps_tone() {
+        let img = RgbaImage::from_fn(5000, 2600, |x, y| {
+            image::Rgba([(x / 20) as u8, (y / 11) as u8, 90, if x < 2500 { 255 } else { 128 }])
+        });
+        let small = working_copy(img.clone());
+        assert_eq!((small.width(), small.height()), (1250, 650));
+        let mut s = Settings::default();
+        s.cols = 120;
+        let (a, b) = (sample_image(&img, &s), sample_image(&small, &s));
+        assert_eq!((a.cols, a.rows), (b.cols, b.rows));
+        let worst = a.rgb.iter().zip(&b.rgb)
+            .flat_map(|(p, q)| (0..3).map(move |c| (p[c] - q[c]).abs()))
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.01, "worst channel drift {worst}");
+        let tiny = RgbaImage::new(300, 200);
+        assert_eq!(working_copy(tiny).dimensions(), (300, 200));
     }
 
     #[test]

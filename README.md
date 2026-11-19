@@ -43,19 +43,28 @@ The sidebar is a catalog of the loaded still, not a settings form.
 | **Hatch** | Diagonal occupancy, sage phosphor |
 | **Scan** | Interlace rows, teal phosphor |
 
-Each look keeps **Cells** (square mosaic) or **Chars** (glyphs), a density slider (**16–400** columns, default **80**), colour (**Source** / **Spectrum** / **Amber** / **Filter** / **Sage** / **Duo**; Filter offers **Cream**, **Teal**, and **Coral**), invert, and one knob that look actually uses (weight, glow, or chroma). Cells is the default. Colour stays put when you switch looks. Weight goes **0.4–4.0**.
+The sidebar asks four things in order: **Look**, **Colour**, **Detail**, **Save**. Everything that refines the result lives behind **Tune**.
+
+- **Look**: pick a pattern from the thumbnails, then **Cells** (square mosaic, the default), **Shaded** (cells that show glyph density) or **Chars** (glyphs).
+- **Colour**: one row of palette swatches (**Source**, **Spectrum**, **Amber**, **Sage**, **Cream**, **Teal**, **Coral**, **Duo**). Hover a swatch for its name. Colour stays put when you switch looks.
+- **Detail**: columns, **16–400**, default **80**.
+- **Save**: PNG, SVG, TXT, JPEG, WEBP, ANSI, plus copy text or image.
 
 ## Looks and colour
 
-A look determines the mark pattern. Colour is independent and can be used with any look. The Visor look offers a texture control that adds stipple to midtones; a moderate texture is selected initially, and zero restores the original Visor marks. The Spectrum colour uses the original Visor palette, with controls to shift its colours, change their range, and mix in the adjusted source image. Reset spectrum restores the original palette settings. Open **Change colour** to choose a palette or adjust its options, then close it to keep the sidebar compact. Look thumbnails reflect the active colour, mark and adjustments.
+A look determines the mark pattern. Colour is independent and can be used with any look. Look thumbnails reflect the active colour, mark and tuning.
 
 Hover over a question mark next to a section or slider label for a description.
 
-## Adjusting the image
+## Tune
 
-Open **Show adjustments** for brightness, contrast, gamma, and auto levels. Auto levels stretches the sampled image tones while ignoring small outliers; uniform images are left unchanged. Reset image adjustments returns these controls to their neutral values. These adjustments persist when switching looks.
+Open **Show tuning** for everything that refines rather than chooses:
 
-Under **Filter**, strength starts at zero to preserve the original palette. Increasing it retains more Teal or Coral in highlights, or brightens Cream midtones. In **Cells**, choose **Solid** for the original mosaic or **Shaded** to reflect glyph density in cell colours. Shading affects the image preview and raster and SVG exports; text characters remain unchanged.
+- **The current look**: its one knob (weight **0.4–4.0**, glow, or chroma), Visor texture (zero restores the original Visor marks), and invert.
+- **The current palette**, when it has settings: Spectrum shift, range and image mix; Cream, Teal or Coral strength (starts at zero to keep the original palette); Duo **Ink** and **Paper** pickers.
+- **The image**: auto levels, brightness, contrast and gamma, applied to the still before the look.
+
+**Reset tuning** returns all of these to neutral. It keeps your look, palette, mark, detail and Duo colours.
 
 ## Run on Linux
 
@@ -81,22 +90,22 @@ There is no ImageMagick. The exe, the dmg, and the wasm build do not call `magic
 
 **Opening an SVG** rasterizes it in-process with [resvg](https://github.com/linebender/resvg) (paths, shapes, basic fills; long side capped at 2048px). Filters, scripts, and some text are not ImageMagick-complete. If that fails, the sidebar says to export the still as a PNG or JPEG and open that instead.
 
-**Saving SVG** from **Out** writes the glyph grid as vector XML. That path never rasterizes and never needs magick.
+**Saving SVG** from **Save** writes the glyph grid as vector XML. That path never rasterizes and never needs magick.
 
 File size is not the limit. After decode, the long side is capped at **2048px** so a 15MB photograph does not take the process down.
 
 ## Export
 
-From the sidebar **Out**:
+From the sidebar **Save**:
 
-- **Vector** - SVG, TXT, ANSI
-- **Raster** - PNG, JPEG, WEBP of the theater mosaic (not the original still)
+- SVG, TXT, ANSI as text or vector
+- PNG, JPEG, WEBP of the theater mosaic (not the original still)
 - **Copy text** - the glyph grid on the clipboard
 - **Copy image** - the mosaic on the clipboard (PNG)
 
 On the web build, downloads go straight to the browser **Downloads** folder. Sage copy reads `saved still.svg` the same way **Copy text** reads `copied text`. Desktop still asks where to put a download.
 
-**Colour** includes **Duo**: the still is read as luma, then mapped from **Ink** to **Paper** (real RGB pickers). Looks still sit on top.
+**Colour** includes **Duo**: the still is read as luma, then mapped from **Ink** to **Paper** (real RGB pickers, under **Tune**). Looks still sit on top.
 
 **SVG** uses the theater grid: CELLS as merged `<rect>` runs, CHARS as one `<text>` row of per-cell `<tspan>`s. Fills are the same 8-bit RGB as the preview. Raster export tiles the same cells (long side about 1600px) so high columns stay abutting instead of an 8px stamp.
 

@@ -79,13 +79,6 @@ pub enum Mark {
 }
 
 impl Mark {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Cells => "Cells",
-            Self::Chars => "Chars",
-        }
-    }
-
     pub fn aspect(self) -> f32 {
         match self {
             Self::Cells => 1.0,
@@ -460,6 +453,26 @@ fn cell_color(s: &Settings, rgb: [f32; 3], yv: f32) -> [u8; 3] {
         _ => return base,
     };
     lerp_u8(base, enhanced, strength)
+}
+
+/// Colour a palette gives tone `t` (0 dark, 1 light) under the current settings.
+/// Source has no fixed ramp, so it previews as a hue sweep at that tone.
+pub fn palette_swatch(s: &Settings, kind: ColorKind, t: f32) -> [u8; 3] {
+    let mut s = *s;
+    s.color_kind = kind;
+    s.color = true;
+    let t = t.clamp(0.0, 1.0);
+    let h = t * 5.0;
+    let x = 1.0 - (h % 2.0 - 1.0).abs();
+    let hue = match h as u32 {
+        0 => [1.0, x, 0.0],
+        1 => [x, 1.0, 0.0],
+        2 => [0.0, 1.0, x],
+        3 => [0.0, x, 1.0],
+        _ => [x, 0.0, 1.0],
+    };
+    let rgb = hue.map(|v| 0.25 + 0.6 * v);
+    cell_color(&s, rgb, t)
 }
 
 fn visor_rgb(y: f32) -> [u8; 3] {

@@ -89,33 +89,9 @@ struct LookThumb {
     grid: Vec<Cell>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OutFamily {
-    Vector,
-    Raster,
-}
-
-impl OutFamily {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Vector => "Vector",
-            Self::Raster => "Raster",
-        }
-    }
-
-    fn kinds(self) -> [io::ExportKind; 3] {
-        match self {
-            Self::Vector => [io::ExportKind::Svg, io::ExportKind::Txt, io::ExportKind::Ansi],
-            Self::Raster => [io::ExportKind::Png, io::ExportKind::Jpeg, io::ExportKind::Webp],
-        }
-    }
-}
-
 struct App {
     settings: Settings,
-    filter_color: ColorKind,
-    adjust_open: bool,
-    colour_open: bool,
+    tune_open: bool,
     look: Look,
     source: Option<RgbaImage>,
     source_name: String,
@@ -134,7 +110,6 @@ struct App {
     thumbs: Option<((u64, Settings), Arc<Vec<LookThumb>>)>,
     samples: Option<(u64, u32, Mark, ascii::Samples)>,
     notice: Option<String>,
-    out_family: OutFamily,
 }
 
 fn thumbnail_settings(current: &Settings, look: Look) -> Settings {
@@ -158,9 +133,7 @@ impl App {
         #[allow(unused_mut)]
         let mut app = Self {
             settings,
-            filter_color: ColorKind::Cream,
-            adjust_open: false,
-            colour_open: false,
+            tune_open: false,
             look: Look::Visor,
             source: None,
             source_name: String::new(),
@@ -179,7 +152,6 @@ impl App {
             thumbs: None,
             samples: None,
             notice: None,
-            out_family: OutFamily::Vector,
         };
         #[cfg(target_arch = "wasm32")]
         install_web_still_hooks(app.jobs_tx.clone(), cc.egui_ctx.clone());
@@ -451,7 +423,6 @@ impl App {
             ui,
             reduced,
             &self.source_name,
-            self.look,
             self.cols,
             self.rows,
         );
@@ -488,276 +459,93 @@ impl App {
                 ui.spacing_mut().item_spacing.x = gap;
                 for look in row {
                     let thumb = thumbs.and_then(|cards| cards.iter().find(|t| t.look == *look));
-                let w = if row.len() == 1 {
-                    ui.available_width()
-                } else if row.len() == 2 {
-                    (ui.available_width() - gap) / 2.0
-                } else {
-                    card_w
-                };
-                    if look_card(
-                        ui,
-                        w,
-                        *look,
-                        self.look == *look,
-                        self.settings.mark,
-                        thumb,
-                        reduced,
-                    )
-                    .clicked()
+                    let w = if row.len() == 1 { ui.available_width() } else { card_w };
+                    if look_card(ui, w, *look, self.look == *look, self.settings.mark, thumb, reduced)
+                        .clicked()
                     {
                         self.apply_look(*look);
                     }
                 }
             });
         }
-
-        section(ui, "Mark");
         ui.horizontal(|ui| {
-            let w = (ui.available_width() - 6.0) / 2.0;
-            for mark in [Mark::Cells, Mark::Chars] {
-                if chip(
-                    ui,
-                    w,
-                    mark.name(),
-                    self.settings.mark == mark,
-                    reduced,
-                )
-                .clicked()
-                {
+            ui.spacing_mut().item_spacing.x = gap;
+            let w = (ui.available_width() - gap * 2.0) / 3.0;
+            let marks = [("Cells", Mark::Cells, false), ("Shaded", Mark::Cells, true), ("Chars", Mark::Chars, false)];
+            for (label, mark, shaded) in marks {
+                let on = self.settings.mark == mark
+                    && (mark == Mark::Chars || self.settings.shade_cells == shaded);
+                if chip(ui, w, label, on, reduced).clicked() && !on {
                     self.settings.mark = mark;
+                    if mark == Mark::Cells {
+                        self.settings.shade_cells = shaded;
+                    }
                     self.thumbs = None;
                     self.dirty = true;
                 }
             }
         });
 
-        if self.settings.mark == Mark::Cells {
-            ui.horizontal(|ui| {
-                let w = (ui.available_width() - 6.0) / 2.0;
-                for (label, shaded) in [("Solid", false), ("Shaded", true)] {
-                    if chip(ui, w, label, self.settings.shade_cells == shaded, reduced).clicked() {
-                        self.settings.shade_cells = shaded;
-                        self.dirty = true;
-                    }
-                }
-            });
-        }
-
-        section(ui, "Density");
-        if archive_dial_u32(ui, "cols", &mut self.settings.cols, 16..=400) {
-            self.dirty = true;
-        }
-
         section(ui, "Colour");
-        let colour_name = if matches!(self.settings.color_kind, ColorKind::Cream | ColorKind::Teal | ColorKind::Coral) {
-            format!("Filter: {}", self.settings.color_kind.name())
-        } else {
-            self.settings.color_kind.name().to_owned()
-        };
-        let toggle_label = if self.colour_open {
-            format!("Hide colour: {colour_name}")
-        } else {
-            format!("Change colour: {colour_name}")
-        };
-        if chip(ui, ui.available_width(), &toggle_label, self.colour_open, reduced).clicked() {
-            self.colour_open = !self.colour_open;
-        }
-        if self.colour_open {
-            let gap = 6.0;
-            let chip_w = (ui.available_width() - gap * 2.0) / 3.0;
-            let filter_active = matches!(
-                self.settings.color_kind,
-                ColorKind::Cream | ColorKind::Teal | ColorKind::Coral
-            );
-            let choices = [
-                ("Source", Some(ColorKind::Source)),
-                ("Spectrum", Some(ColorKind::Visor)),
-                ("Amber", Some(ColorKind::Amber)),
-                ("Filter", None),
-                ("Sage", Some(ColorKind::Sage)),
-                ("Duo", Some(ColorKind::Duo)),
-            ];
-            for row in choices.chunks(3) {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    for &(label, kind) in row {
-                        let selected = kind.map_or(filter_active, |kind| self.settings.color_kind == kind);
-                        if chip(ui, chip_w, label, selected, reduced).clicked() {
-                            self.settings.color_kind = kind.unwrap_or(self.filter_color);
-                            self.dirty = true;
-                        }
-                    }
-                });
-            }
-            if filter_active {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    for kind in [ColorKind::Cream, ColorKind::Teal, ColorKind::Coral] {
-                        if chip(ui, chip_w, kind.name(), self.settings.color_kind == kind, reduced).clicked() {
-                            self.filter_color = kind;
-                            self.settings.color_kind = kind;
-                            self.dirty = true;
-                        }
-                    }
-                });
-            }
-            if filter_active && archive_dial_f32(ui, "strength", &mut self.settings.filter_strength, 0.0..=1.0, 2) {
-                self.dirty = true;
-            }
-            if self.settings.color_kind == ColorKind::Visor {
-                if archive_dial_f32(ui, "spectrum shift", &mut self.settings.spectrum_shift, -0.5..=0.5, 2) {
-                    self.dirty = true;
-                }
-                if archive_dial_f32(ui, "spectrum range", &mut self.settings.spectrum_range, 0.0..=2.0, 2) {
-                    self.dirty = true;
-                }
-                if archive_dial_f32(ui, "image mix", &mut self.settings.spectrum_mix, 0.0..=1.0, 2) {
-                    self.dirty = true;
-                }
-                if chip(ui, ui.available_width(), "Reset spectrum", false, reduced).clicked() {
-                    self.settings.spectrum_shift = 0.0;
-                    self.settings.spectrum_range = 1.0;
-                    self.settings.spectrum_mix = 0.0;
-                    self.dirty = true;
-                }
-            }
-            let duo_t = anim_bool(
-                ui,
-                "duo-row",
-                self.settings.color_kind == ColorKind::Duo,
-                0.2,
-                reduced,
-                ease_in_out_ui,
-            );
-            if duo_t > 0.01 {
-                let full = ui.available_width();
-                ui.allocate_ui(Vec2::new(full, HIT * duo_t), |ui| {
-                    ui.set_clip_rect(ui.max_rect());
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = gap;
-                        let w = (full - gap) / 2.0;
-                        if duo_picker(ui, w, "Ink", &mut self.settings.duo_ink, reduced) {
-                            self.dirty = true;
-                        }
-                        if duo_picker(ui, w, "Paper", &mut self.settings.duo_paper, reduced) {
-                            self.dirty = true;
-                        }
-                    });
-                });
-            }
-
-        }
-
-        section(ui, self.look.name());
         ui.horizontal(|ui| {
-            let width = (ui.available_width() - 30.0).max(1.0);
-            if chip(
-                ui,
-                width,
-                if self.settings.invert { "Invert on" } else { "Invert" },
-                self.settings.invert,
-                reduced,
-            )
-            .clicked()
-            {
-                self.settings.invert = !self.settings.invert;
-                self.dirty = true;
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let w = (ui.available_width() - 4.0 * (COLOURS.len() as f32 - 1.0)) / COLOURS.len() as f32;
+            for kind in COLOURS {
+                if swatch(ui, w, &self.settings, kind, self.settings.color_kind == kind, reduced)
+                    .on_hover_text(kind.name())
+                    .clicked()
+                {
+                    self.settings.color_kind = kind;
+                    self.dirty = true;
+                }
             }
-            help_icon(ui, "Swaps which image tones receive dense marks and palette colours.");
         });
-        let (knob, range) = self.look.knob();
-        let analog = match self.look {
-            Look::Visor | Look::Blocks | Look::Dither | Look::Hatch => {
-                &mut self.settings.contrast
-            }
-            Look::Crt | Look::Scan => &mut self.settings.brightness,
-            Look::Ansi => &mut self.settings.saturation,
-        };
-        if archive_dial_f32(ui, knob, analog, range, 2) {
+        ui.label(
+            RichText::new(self.settings.color_kind.name())
+                .family(FontFamily::Monospace)
+                .size(11.0)
+                .color(CREAM),
+        );
+
+        section(ui, "Detail");
+        if archive_dial_u32(ui, "columns", &mut self.settings.cols, 16..=400) {
             self.dirty = true;
         }
 
-        if self.look == Look::Visor
-            && archive_dial_f32(ui, "texture", &mut self.settings.visor_texture, 0.0..=1.0, 2)
-        {
-            self.dirty = true;
-        }
-
-        section(ui, "Adjust image");
+        section(ui, "Tune");
         if chip(
             ui,
             ui.available_width(),
-            if self.adjust_open { "Hide adjustments" } else { "Show adjustments" },
-            self.adjust_open,
+            if self.tune_open { "Hide tuning" } else { "Show tuning" },
+            self.tune_open,
             reduced,
         )
         .clicked()
         {
-            self.adjust_open = !self.adjust_open;
+            self.tune_open = !self.tune_open;
         }
-        if self.adjust_open {
-            ui.horizontal(|ui| {
-                let width = (ui.available_width() - 30.0).max(1.0);
-                if chip(
-                    ui,
-                    width,
-                    if self.settings.auto_levels { "Auto levels on" } else { "Auto levels" },
-                    self.settings.auto_levels,
-                    reduced,
-                )
-                .clicked()
-                {
-                    self.settings.auto_levels = !self.settings.auto_levels;
-                    self.dirty = true;
-                }
-                help_icon(ui, "Spreads the image's sampled tones while ignoring isolated extremes. Flat images stay unchanged.");
-            });
-            if archive_dial_f32(ui, "brightness", &mut self.settings.tone_brightness, -0.5..=0.5, 2) {
-                self.dirty = true;
-            }
-            if archive_dial_f32(ui, "contrast", &mut self.settings.tone_contrast, 0.4..=2.0, 2) {
-                self.dirty = true;
-            }
-            if archive_dial_f32(ui, "gamma", &mut self.settings.tone_gamma, 0.4..=2.5, 2) {
-                self.dirty = true;
-            }
-            if chip(ui, ui.available_width(), "Reset image adjustments", false, reduced).clicked() {
-                self.settings.tone_brightness = 0.0;
-                self.settings.tone_contrast = 1.0;
-                self.settings.tone_gamma = 1.0;
-                self.settings.auto_levels = false;
-                self.dirty = true;
-            }
+        if self.tune_open {
+            self.paint_tuning(ui, reduced);
         }
 
-        section(ui, "Out");
-        ui.horizontal(|ui| {
-            let w = (ui.available_width() - 6.0) / 2.0;
-            for family in [OutFamily::Vector, OutFamily::Raster] {
-                if chip(
-                    ui,
-                    w,
-                    family.name(),
-                    self.out_family == family,
-                    reduced,
-                )
-                .clicked()
-                {
-                    self.out_family = family;
+        section(ui, "Save");
+        for row in [
+            [io::ExportKind::Png, io::ExportKind::Svg, io::ExportKind::Txt],
+            [io::ExportKind::Jpeg, io::ExportKind::Webp, io::ExportKind::Ansi],
+        ] {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                let w = (ui.available_width() - gap * 2.0) / 3.0;
+                for kind in row {
+                    if chip(ui, w, kind.label(), false, reduced).clicked() {
+                        self.save_export(kind);
+                    }
                 }
-            }
-        });
+            });
+        }
         ui.horizontal(|ui| {
-            let w = (ui.available_width() - 12.0) / 3.0;
-            for kind in self.out_family.kinds() {
-                if chip(ui, w, kind.label(), false, reduced).clicked() {
-                    self.save_export(kind);
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            let w = (ui.available_width() - 6.0) / 2.0;
+            ui.spacing_mut().item_spacing.x = gap;
+            let w = (ui.available_width() - gap) / 2.0;
             if chip(ui, w, "Copy text", false, reduced).clicked() {
                 self.copy_txt(ui.ctx());
             }
@@ -766,6 +554,110 @@ impl App {
             }
         });
     }
+
+    /// Everything that refines a result rather than choosing it.
+    fn paint_tuning(&mut self, ui: &mut egui::Ui, reduced: bool) {
+        let mut changed = false;
+        subhead(ui, self.look.name());
+        let (knob, range) = self.look.knob();
+        let analog = match self.look {
+            Look::Visor | Look::Blocks | Look::Dither | Look::Hatch => &mut self.settings.contrast,
+            Look::Crt | Look::Scan => &mut self.settings.brightness,
+            Look::Ansi => &mut self.settings.saturation,
+        };
+        changed |= archive_dial_f32(ui, knob, analog, range, 2);
+        if self.look == Look::Visor {
+            changed |= archive_dial_f32(ui, "texture", &mut self.settings.visor_texture, 0.0..=1.0, 2);
+        }
+        changed |= toggle_with_help(
+            ui,
+            "Invert",
+            &mut self.settings.invert,
+            "Swaps which image tones receive dense marks and palette colours.",
+            reduced,
+        );
+
+        match self.settings.color_kind {
+            ColorKind::Visor => {
+                subhead(ui, "Spectrum");
+                changed |= archive_dial_f32(ui, "shift", &mut self.settings.spectrum_shift, -0.5..=0.5, 2);
+                changed |= archive_dial_f32(ui, "range", &mut self.settings.spectrum_range, 0.0..=2.0, 2);
+                changed |= archive_dial_f32(ui, "image mix", &mut self.settings.spectrum_mix, 0.0..=1.0, 2);
+            }
+            ColorKind::Cream | ColorKind::Teal | ColorKind::Coral => {
+                subhead(ui, self.settings.color_kind.name());
+                changed |= archive_dial_f32(ui, "strength", &mut self.settings.filter_strength, 0.0..=1.0, 2);
+            }
+            ColorKind::Duo => {
+                subhead(ui, "Duo");
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let w = (ui.available_width() - 6.0) / 2.0;
+                    changed |= duo_picker(ui, w, "Ink", &mut self.settings.duo_ink, reduced);
+                    changed |= duo_picker(ui, w, "Paper", &mut self.settings.duo_paper, reduced);
+                });
+            }
+            _ => {}
+        }
+
+        subhead(ui, "Image");
+        changed |= toggle_with_help(
+            ui,
+            "Auto levels",
+            &mut self.settings.auto_levels,
+            "Spreads the image's sampled tones while ignoring isolated extremes. Flat images stay unchanged.",
+            reduced,
+        );
+        changed |= archive_dial_f32(ui, "brightness", &mut self.settings.tone_brightness, -0.5..=0.5, 2);
+        changed |= archive_dial_f32(ui, "contrast", &mut self.settings.tone_contrast, 0.4..=2.0, 2);
+        changed |= archive_dial_f32(ui, "gamma", &mut self.settings.tone_gamma, 0.4..=2.5, 2);
+
+        ui.add_space(4.0);
+        if chip(ui, ui.available_width(), "Reset tuning", false, reduced).clicked() {
+            reset_tuning(&mut self.settings);
+            changed = true;
+        }
+        if changed {
+            self.dirty = true;
+        }
+    }
+}
+
+/// Palettes in the order they appear: image colour, then ramps, then custom.
+const COLOURS: [ColorKind; 8] = [
+    ColorKind::Source,
+    ColorKind::Visor,
+    ColorKind::Amber,
+    ColorKind::Sage,
+    ColorKind::Cream,
+    ColorKind::Teal,
+    ColorKind::Coral,
+    ColorKind::Duo,
+];
+
+/// Returns tuning to the look's own defaults. Look, mark, palette, density
+/// and Duo colours are choices, not tuning, so they stay.
+fn reset_tuning(s: &mut Settings) {
+    let fresh = Settings::default();
+    let (look, colour, mark, shade, cols) = (s.look, s.color_kind, s.mark, s.shade_cells, s.cols);
+    let (ink, paper) = (s.duo_ink, s.duo_paper);
+    look.apply(s);
+    s.color_kind = colour;
+    s.mark = mark;
+    s.shade_cells = shade;
+    s.cols = cols;
+    s.duo_ink = ink;
+    s.duo_paper = paper;
+    s.visor_texture = fresh.visor_texture;
+    s.invert = fresh.invert;
+    s.filter_strength = fresh.filter_strength;
+    s.spectrum_shift = fresh.spectrum_shift;
+    s.spectrum_range = fresh.spectrum_range;
+    s.spectrum_mix = fresh.spectrum_mix;
+    s.auto_levels = fresh.auto_levels;
+    s.tone_brightness = fresh.tone_brightness;
+    s.tone_contrast = fresh.tone_contrast;
+    s.tone_gamma = fresh.tone_gamma;
 }
 
 impl eframe::App for App {
@@ -796,6 +688,7 @@ impl eframe::App for App {
                 .show_separator_line(false)
                 .frame(chrome)
                 .show(ctx, |ui| {
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -809,6 +702,7 @@ impl eframe::App for App {
                 .show_separator_line(false)
                 .frame(chrome)
                 .show(ctx, |ui| {
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -1426,7 +1320,6 @@ fn archive_plate(
     ui: &mut egui::Ui,
     reduced: bool,
     name: &str,
-    look: Look,
     cols: u32,
     rows: u32,
 ) {
@@ -1493,9 +1386,9 @@ fn archive_plate(
     p.galley(pos, p.layout_job(job(CREAM)), CREAM);
 
     let meta = if cols > 0 {
-        format!("{}  {cols}×{rows}", look.name())
+        format!("{cols}×{rows} cells")
     } else {
-        format!("{}  no still", look.name())
+        "no still".to_owned()
     };
     p.text(
         rect.min + Vec2::new(10.0, 28.0),
@@ -1743,21 +1636,66 @@ fn help_icon(ui: &mut egui::Ui, help: &str) {
 
 fn section_help(name: &str) -> Option<&'static str> {
     match name {
-        "Look" => Some("Look controls the pattern and characters. Colour controls the palette independently."),
-        "Mark" => Some("Cells are square tiles. Chars use text glyphs; shaded cells show glyph density."),
-        "Density" => Some("More columns add detail and produce a larger grid."),
-        "Colour" => Some("Choose a palette independently of the look. Spectrum is the Visor colour ramp."),
-        "Adjust image" => Some("Adjust the source tones before the look and colour are applied."),
-        "Out" => Some("Export the current result or copy it to the clipboard."),
-        "Visor" => Some("Visor shapes the artwork using blocks and adjustable texture. Colour is chosen separately."),
-        "Blocks" => Some("Blocks maps image brightness to block characters."),
-        "Crt" => Some("Crt uses punctuation for a terminal-inspired texture."),
-        "Ansi" => Some("Ansi maps brightness to letters, numbers and symbols."),
-        "Dither" => Some("Dither uses an ordered stipple pattern to suggest intermediate tones."),
-        "Hatch" => Some("Hatch makes diagonal bands whose density follows the image."),
-        "Scan" => Some("Scan alternates visible and blank rows."),
+        "Look" => Some("Pick the pattern. Cells are square tiles, Shaded tiles show density, Chars use text glyphs."),
+        "Colour" => Some("Pick a palette. It stays when you change look. Hover a swatch for its name."),
+        "Detail" => Some("More columns add detail and make a larger grid."),
+        "Tune" => Some("Fine adjustments for the current look, palette and source image. Reset tuning undoes them all."),
+        "Save" => Some("Download the result, or copy it to the clipboard."),
         _ => None,
     }
+}
+
+fn subhead(ui: &mut egui::Ui, name: &str) {
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(name)
+            .family(FontFamily::Monospace)
+            .size(11.0)
+            .color(CREAM.gamma_multiply(0.7)),
+    );
+}
+
+fn toggle_with_help(ui: &mut egui::Ui, label: &str, value: &mut bool, help: &str, reduced: bool) -> bool {
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - 30.0).max(1.0);
+        let text = if *value { format!("{label} on") } else { label.to_owned() };
+        let clicked = chip(ui, width, &text, *value, reduced).clicked();
+        if clicked {
+            *value = !*value;
+        }
+        help_icon(ui, help);
+        clicked
+    })
+    .inner
+}
+
+fn swatch(ui: &mut egui::Ui, width: f32, s: &Settings, kind: ColorKind, on: bool, reduced: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 26.0), Sense::click());
+    let scale = press_scale(ui, resp.id, resp.is_pointer_button_down_on(), reduced);
+    let on_t = anim_bool(ui, resp.id.with("on"), on, 0.16, reduced, ease_out_ui);
+    let hover_t = anim_bool(ui, resp.id.with("hover"), resp.hovered(), 0.12, reduced, ease_color);
+    let r = Rect::from_center_size(rect.center(), rect.size() * scale);
+    let inner = r.shrink(3.0);
+    let bands = 6;
+    let band_w = inner.width() / bands as f32;
+    for i in 0..bands {
+        let t = (i as f32 + 0.5) / bands as f32;
+        let [cr, cg, cb] = ascii::palette_swatch(s, kind, 0.1 + 0.9 * t);
+        let x0 = inner.min.x + band_w * i as f32;
+        ui.painter().rect_filled(
+            Rect::from_min_max(Pos2::new(x0, inner.min.y), Pos2::new(x0 + band_w + 0.5, inner.max.y)),
+            0,
+            Color32::from_rgb(cr, cg, cb),
+        );
+    }
+    let stroke = lerp_c32(CREAM.gamma_multiply(0.22), CREAM, on_t.max(hover_t * 0.5));
+    ui.painter().rect_stroke(
+        r,
+        CornerRadius::same(2),
+        Stroke::new(1.0 + 0.6 * on_t, stroke),
+        egui::StrokeKind::Inside,
+    );
+    resp
 }
 
 fn section(ui: &mut egui::Ui, name: &str) {
@@ -1777,15 +1715,6 @@ fn section(ui: &mut egui::Ui, name: &str) {
 fn ease_out_ui(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(4)
-}
-
-fn ease_in_out_ui(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    if t < 0.5 {
-        8.0 * t * t * t * t
-    } else {
-        1.0 - (-2.0 * t + 2.0).powi(4) / 2.0
-    }
 }
 
 fn ease_color(t: f32) -> f32 {
@@ -2197,6 +2126,26 @@ mod drop_url_tests {
         assert!(other.mark == Mark::Chars);
         assert_eq!(other.contrast, 1.0);
         assert_eq!(other.cols, 28);
+    }
+
+    #[test]
+    fn reset_tuning_keeps_choices_and_restores_adjustments() {
+        let mut s = Settings::default();
+        Look::Crt.apply(&mut s);
+        s.color_kind = ColorKind::Duo;
+        s.duo_ink = [1, 2, 3];
+        s.mark = Mark::Chars;
+        s.cols = 200;
+        s.brightness = 0.4;
+        s.invert = true;
+        s.tone_gamma = 2.0;
+        s.auto_levels = true;
+        s.spectrum_mix = 0.5;
+        reset_tuning(&mut s);
+        assert!(s.look == Look::Crt && s.color_kind == ColorKind::Duo && s.mark == Mark::Chars);
+        assert_eq!((s.cols, s.duo_ink), (200, [1, 2, 3]));
+        assert_eq!((s.brightness, s.tone_gamma, s.spectrum_mix), (0.0, 1.0, 0.0));
+        assert!(!s.invert && !s.auto_levels);
     }
 
     #[test]

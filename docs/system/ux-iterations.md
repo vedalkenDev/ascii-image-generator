@@ -41,3 +41,20 @@ Discover: thumbnail cards used their own default colours and cell geometry, whil
 Define and develop: render previews from the active colour, mark, shared adjustments and relevant look state, at thumbnail density.
 
 Deliver: tests check the selected and alternate thumbnail settings. Browser captures show the active palette applied to the cards. Thumbnails are approximations at lower density. Selecting the active look no longer resets its adjustment.
+
+## Simplification pass
+
+Thesis: choose a look, choose a palette, set the detail, save. Those four stay visible; anything that refines a result sits behind one **Tune** disclosure, never deeper.
+
+| Before | After | Reason |
+|---|---|---|
+| Plate repeated the look name | Plate shows size and file only | The selected card already names the look. |
+| Mark: two chip rows | One row under Look: Cells, Shaded, Chars | Two toggles were one choice. |
+| Density | Detail | Plainer word. |
+| Colour fold, Filter group, inline sliders | One row of live palette swatches | A main choice should not need a click to reveal; Filter hid three palettes a level deeper. |
+| Look section (knob, texture, invert) | Tune | Refinement, not a choice. |
+| Adjust image | Tune | Its contrast sat apart from the look's weight; now they sit together. |
+| Two reset buttons | One Reset tuning | One way back. |
+| Out: Vector/Raster switch, then formats | Save: all six formats, plus copy | The switch hid half the formats. |
+
+Deliver: no setting removed. Desktop sidebar fits one screen with Tune closed. Browser captures checked default, open Tune, swatch hover and narrow layout.

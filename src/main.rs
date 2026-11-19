@@ -87,6 +87,8 @@ struct LookThumb {
     cols: u32,
     rows: u32,
     grid: Vec<Cell>,
+    /// Cells thumbnails upload once as a texture instead of hundreds of rects per frame.
+    mosaic: Option<egui::TextureHandle>,
 }
 
 struct App {
@@ -101,12 +103,14 @@ struct App {
     dirty: bool,
     error: Option<String>,
     reduced_motion: bool,
+    motion_checked_at: f64,
     jobs_tx: Sender<Job>,
     jobs_rx: Receiver<Job>,
     busy: Option<&'static str>,
     grid_gen: u64,
     source_gen: u64,
     preview: Option<(u64, Vec2, Vec<Arc<Galley>>)>,
+    mosaic: Option<(u64, egui::TextureHandle)>,
     thumbs: Option<((u64, Settings), Arc<Vec<LookThumb>>)>,
     samples: Option<(u64, u32, Mark, ascii::Samples)>,
     notice: Option<String>,
@@ -143,12 +147,14 @@ impl App {
             dirty: false,
             error: None,
             reduced_motion: reduced_motion(&cc.egui_ctx),
+            motion_checked_at: 0.0,
             jobs_tx,
             jobs_rx,
             busy: None,
             grid_gen: 0,
             source_gen: 0,
             preview: None,
+            mosaic: None,
             thumbs: None,
             samples: None,
             notice: None,
@@ -184,7 +190,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn ensure_thumbs(&mut self) {
+    fn ensure_thumbs(&mut self, ctx: &egui::Context) {
         let mut thumbnail_state = self.settings;
         thumbnail_state.cols = 28;
         let key = (self.source_gen, thumbnail_state);
@@ -205,11 +211,14 @@ impl App {
             .map(|look| {
                 let s = thumbnail_settings(&thumbnail_state, *look);
                 let (cols, rows, grid) = ascii::convert_samples(&samples, &s);
+                let mosaic = (s.mark == Mark::Cells)
+                    .then(|| mosaic_texture(ctx, "thumb", cols, rows, &grid));
                 LookThumb {
                     look: *look,
                     cols,
                     rows,
                     grid,
+                    mosaic,
                 }
             })
             .collect();
@@ -666,14 +675,19 @@ impl eframe::App for App {
         self.poll_drops(ctx);
         // wasm drop-decode is sync, so a second drain picks up Loaded this frame.
         self.poll_jobs(ctx);
-        self.reduced_motion = reduced_motion(ctx);
+        // The OS setting rarely changes; poll it once a second, not every frame.
+        let now = ctx.input(|i| i.time);
+        if now - self.motion_checked_at > 1.0 {
+            self.reduced_motion = reduced_motion(ctx);
+            self.motion_checked_at = now;
+        }
         if self.dirty {
             self.rebuild();
         }
         let reduced = self.reduced_motion;
         let busy = self.busy;
         let narrow = ctx.screen_rect().width() < 760.0;
-        self.ensure_thumbs();
+        self.ensure_thumbs(ctx);
         let thumbs = self.thumbs.as_ref().map(|(_, cards)| cards.clone());
         let chrome = Frame::new()
             .fill(GROUND)
@@ -1445,7 +1459,10 @@ fn look_card(
     ui.painter()
         .rect_filled(preview, 0, Color32::from_rgb(0x08, 0x09, 0x0c));
     if let Some(thumb) = thumb {
-        paint_grid(ui, preview, thumb.cols, thumb.rows, &thumb.grid, mark);
+        match &thumb.mosaic {
+            Some(tex) => paint_texture(ui, preview, tex),
+            None => paint_grid(ui, preview, thumb.cols, thumb.rows, &thumb.grid, mark),
+        }
     } else {
         ui.painter().text(
             preview.center(),
@@ -1478,7 +1495,13 @@ fn paint_preview(ui: &egui::Ui, rect: Rect, app: &mut App) {
         return;
     }
     if app.settings.mark == Mark::Cells {
-        paint_mosaic(ui, rect, app.cols, app.rows, &app.grid);
+        if !app.mosaic.as_ref().is_some_and(|(gen, _)| *gen == app.grid_gen) {
+            let tex = mosaic_texture(ui.ctx(), "preview", app.cols, app.rows, &app.grid);
+            app.mosaic = Some((app.grid_gen, tex));
+        }
+        if let Some((_, tex)) = &app.mosaic {
+            paint_texture(ui, rect, tex);
+        }
         return;
     }
     let size = rect.size();
@@ -1509,7 +1532,8 @@ fn paint_grid(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell], ma
         return;
     }
     if mark == Mark::Cells {
-        paint_mosaic(ui, rect, cols, rows, grid);
+        let tex = mosaic_texture(ui.ctx(), "grid", cols, rows, grid);
+        paint_texture(ui, rect, &tex);
         return;
     }
     let galleys = layout_cells(ui, rect, cols, rows, grid);
@@ -1521,37 +1545,29 @@ fn paint_grid(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell], ma
     }
 }
 
-fn paint_mosaic(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) {
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0, GROUND);
-    let ppp = ui.ctx().pixels_per_point();
-    let snap = |v: f32| (v * ppp).round() / ppp;
-    let w = rect.width();
-    let h = rect.height();
-    for y in 0..rows {
-        let y0 = snap(rect.top() + (y as f32 / rows as f32) * h);
-        let y1 = snap(rect.top() + ((y + 1) as f32 / rows as f32) * h);
-        for x in 0..cols {
-            let idx = (y * cols + x) as usize;
-            if idx >= grid.len() {
-                continue;
-            }
-            let cell = grid[idx];
-            if cell.ch == ' ' {
-                continue;
-            }
-            let x0 = snap(rect.left() + (x as f32 / cols as f32) * w);
-            let x1 = snap(rect.left() + ((x + 1) as f32 / cols as f32) * w);
-            if x1 <= x0 || y1 <= y0 {
-                continue;
-            }
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
-                0,
-                Color32::from_rgb(cell.color[0], cell.color[1], cell.color[2]),
-            );
+/// One texel per cell; nearest filtering keeps hard cell edges at any zoom.
+fn mosaic_texture(ctx: &egui::Context, name: &str, cols: u32, rows: u32, grid: &[Cell]) -> egui::TextureHandle {
+    let (w, h) = (cols.max(1) as usize, rows.max(1) as usize);
+    let mut pixels = vec![GROUND; w * h];
+    for (px, cell) in pixels.iter_mut().zip(grid) {
+        if cell.ch != ' ' {
+            *px = Color32::from_rgb(cell.color[0], cell.color[1], cell.color[2]);
         }
     }
+    ctx.load_texture(
+        name,
+        egui::ColorImage::new([w, h], pixels),
+        egui::TextureOptions::NEAREST,
+    )
+}
+
+fn paint_texture(ui: &egui::Ui, rect: Rect, tex: &egui::TextureHandle) {
+    ui.painter_at(rect).image(
+        tex.id(),
+        rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 fn layout_cells(
@@ -2204,5 +2220,77 @@ mod drop_url_tests {
             still_name_from_url("https://i.pinimg.com/originals/ab/cd/ef.jpg?foo=1"),
             "ef.jpg"
         );
+    }
+}
+
+#[cfg(test)]
+mod perf_bench {
+    use super::*;
+    use std::time::Instant;
+
+    fn photo(w: u32, h: u32) -> RgbaImage {
+        RgbaImage::from_fn(w, h, |x, y| {
+            let n = (x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503)) % 64;
+            image::Rgba([((x * 255) / w) as u8, ((y * 255) / h) as u8, (n * 3) as u8, 255])
+        })
+    }
+
+    fn frame_ms(ctx: &egui::Context, mut paint: impl FnMut(&egui::Ui, Rect)) -> f64 {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+            ..Default::default()
+        };
+        let t = Instant::now();
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(1200.0, 900.0));
+                paint(ui, r);
+            });
+        });
+        let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+        t.elapsed().as_secs_f64() * 1000.0
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_pipeline() {
+        let img = photo(4000, 3000);
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        for cols in [80u32, 200, 400] {
+            for mark in [Mark::Cells, Mark::Chars] {
+                let mut s = Settings::default();
+                Look::Visor.apply(&mut s);
+                s.cols = cols;
+                s.mark = mark;
+                let t = Instant::now();
+                let samples = ascii::sample_image(&img, &s);
+                let sample_ms = t.elapsed().as_secs_f64() * 1000.0;
+                let t = Instant::now();
+                let (c, r, grid) = ascii::convert_samples(&samples, &s);
+                let convert_ms = t.elapsed().as_secs_f64() * 1000.0;
+                // first frame (layout) and steady frame (cached)
+                let mut cache: Option<Vec<Arc<Galley>>> = None;
+                let mut tex: Option<egui::TextureHandle> = None;
+                let mut draw = |ui: &egui::Ui, rect: Rect| {
+                    if mark == Mark::Cells {
+                        let tex = tex.get_or_insert_with(|| mosaic_texture(ui.ctx(), "bench", c, r, &grid));
+                        paint_texture(ui, rect, tex);
+                    } else {
+                        let g = cache.get_or_insert_with(|| layout_cells(ui, rect, c, r, &grid));
+                        let gh = rect.height() / r as f32;
+                        for (y, galley) in g.iter().enumerate() {
+                            ui.painter().galley(Pos2::new(rect.left(), rect.top() + y as f32 * gh), galley.clone(), CREAM);
+                        }
+                    }
+                };
+                let first = frame_ms(&ctx, &mut draw);
+                let steady = (0..5).map(|_| frame_ms(&ctx, &mut draw)).sum::<f64>() / 5.0;
+                println!(
+                    "cols {cols:>3} {:>5}: {}x{} sample {sample_ms:6.2}ms convert {convert_ms:6.2}ms frame1 {first:7.2}ms steady {steady:7.2}ms",
+                    if mark == Mark::Cells { "cells" } else { "chars" }, c, r
+                );
+            }
+        }
     }
 }

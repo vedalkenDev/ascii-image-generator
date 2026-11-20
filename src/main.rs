@@ -16,7 +16,7 @@ use ascii::{Cell, ColorKind, Look, Mark, Settings};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, Galley,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame,
     Layout, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
 };
 use eframe::emath::Align;
@@ -1561,15 +1561,8 @@ fn paint_grid(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell], ma
         paint_texture(ui, rect, &tex);
         return;
     }
-    // Thumbnails are tiny and rebuilt every frame: plain galleys keep their
-    // font-atlas UVs valid without any cache bookkeeping.
-    let galleys = layout_cells(ui, rect, cols, rows, grid);
-    let font_size = rect.height() / rows as f32;
-    let painter = ui.painter_at(rect);
-    for (y, galley) in galleys.iter().enumerate() {
-        let pos = Pos2::new(rect.left(), rect.top() + y as f32 * font_size);
-        painter.galley(pos, galley.clone(), CREAM);
-    }
+    // Rebuilt every frame (thumbnails are small), so atlas UVs stay fresh.
+    ui.painter_at(rect).add(glyph_mesh(ui, rect, cols, rows, grid));
 }
 
 /// One texel per cell; nearest filtering keeps hard cell edges at any zoom.
@@ -1611,10 +1604,13 @@ fn glyph_mesh(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) ->
         font_size *= gw / probe.size().x;
     }
     let font = FontId::monospace(font_size);
-    let advance = painter
-        .layout_no_wrap("█".to_owned(), font.clone(), Color32::WHITE)
-        .size()
-        .x;
+    // Stretch each glyph box to its cell so the art fills `rect` whatever its
+    // aspect (a wide thumbnail would otherwise squeeze glyphs to the left).
+    let natural = painter.layout_no_wrap("█".to_owned(), font.clone(), Color32::WHITE).size();
+    let scale = Vec2::new(
+        if natural.x > 0.0 { gw / natural.x } else { 1.0 },
+        if natural.y > 0.0 { gh / natural.y } else { 1.0 },
+    );
     // Per glyph: its mesh relative to the cell origin, laid out once.
     let mut stamps: Vec<(char, egui::Mesh)> = Vec::new();
     let mut mesh = egui::Mesh::default();
@@ -1646,11 +1642,11 @@ fn glyph_mesh(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) ->
                 continue;
             }
             mesh.texture_id = stamp.texture_id;
-            let origin = Vec2::new(left + snap(x as f32 * advance), top);
+            let origin = Vec2::new(left + snap(x as f32 * gw), top);
             let color = Color32::from_rgb(cell.color[0], cell.color[1], cell.color[2]);
             let base = mesh.vertices.len() as u32;
             mesh.vertices.extend(stamp.vertices.iter().map(|v| egui::epaint::Vertex {
-                pos: v.pos + origin,
+                pos: Pos2::new(v.pos.x * scale.x, v.pos.y * scale.y) + origin,
                 color,
                 uv: v.uv,
             }));
@@ -1665,70 +1661,6 @@ fn glyph_mesh(ui: &egui::Ui, rect: Rect, cols: u32, rows: u32, grid: &[Cell]) ->
         v.uv = Pos2::new(v.uv.x * norm.x, v.uv.y * norm.y);
     }
     mesh
-}
-
-fn layout_cells(
-    ui: &egui::Ui,
-    rect: Rect,
-    cols: u32,
-    rows: u32,
-    grid: &[Cell],
-) -> Vec<Arc<Galley>> {
-    let painter = ui.painter();
-    let gw = rect.width() / cols as f32;
-    let gh = rect.height() / rows as f32;
-    let mut font_size = gh;
-    let probe = painter.layout_no_wrap(
-        "█".to_owned(),
-        FontId::monospace(font_size),
-        Color32::WHITE,
-    );
-    if probe.size().x > gw && probe.size().x > 0.0 {
-        font_size *= gw / probe.size().x;
-    }
-    let font = FontId::monospace(font_size);
-    let mut galleys = Vec::with_capacity(rows as usize);
-    for y in 0..rows {
-        let mut job = egui::text::LayoutJob::default();
-        job.wrap.max_width = f32::INFINITY;
-        let row = y * cols;
-        let mut x = 0;
-        while x < cols {
-            let idx = (row + x) as usize;
-            if idx >= grid.len() {
-                break;
-            }
-            let cell = grid[idx];
-            let mut run = String::new();
-            run.push(cell.ch);
-            x += 1;
-            while x < cols {
-                let nidx = (row + x) as usize;
-                if nidx >= grid.len() {
-                    break;
-                }
-                let next = grid[nidx];
-                if next.color != cell.color {
-                    break;
-                }
-                run.push(next.ch);
-                x += 1;
-            }
-            let c = cell.color;
-            job.append(
-                &run,
-                0.0,
-                egui::TextFormat {
-                    font_id: font.clone(),
-                    color: Color32::from_rgb(c[0], c[1], c[2]),
-                    extra_letter_spacing: 0.0,
-                    ..Default::default()
-                },
-            );
-        }
-        galleys.push(painter.layout_job(job));
-    }
-    galleys
 }
 
 fn help_icon(ui: &mut egui::Ui, help: &str) {
@@ -2413,8 +2345,10 @@ mod glyph_mesh_tests {
         let (v, i, valid, bounds, color) = info.unwrap();
         println!("verts {v} idx {i} valid {valid} bounds {bounds:?} color {color:?}");
         assert!(valid && v >= 8 * 4 && i >= 8 * 6);
-        // Glyphs are narrower than the 60pt cell box (same as galley layout).
-        assert!(bounds.width() > 30.0 && bounds.height() > 30.0);
+        // Glyphs fill their 60x20 cells, so ink spans the whole 240x60 rect.
+        assert!((bounds.right() - 250.0).abs() < 1.5, "right edge {bounds:?}");
+        assert!((bounds.left() - 10.0).abs() < 1.5, "left edge {bounds:?}");
+        assert!((bounds.height() - 60.0).abs() < 1.5, "height {bounds:?}");
         let uv_max = ctx.fonts(|f| f.font_image_size());
         assert!(uv_max[0] > 1, "atlas size {uv_max:?}");
         assert_eq!(color, Some(Color32::from_rgb(200, 10, 10)));
